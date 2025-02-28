@@ -40,6 +40,8 @@ if strategy == 'scalping':
     }
 else:  # grid strategy
     # Global grid strategy parameters and symbol-specific settings
+    if strategy == 'grid':
+    # Global grid strategy parameters and symbol-specific settings
     params = {
         'symbols': ['BTC/USDT:USDT', 'SOL/USDT:USDT', 'XRP/USDT:USDT'],
         'timeframe': '1m',
@@ -48,34 +50,35 @@ else:  # grid strategy
         'trend_filter': True,
         'trend_ema_period': 50,
         'max_active_grids': 3,
-        # Define symbol-specific grid settings:
+        # Symbol-specific grid settings:
         'grid_settings': {
             'BTC/USDT:USDT': {
                 'balance_per_symbol': 15,  
                 'grid_distance': 100,       # 100 USDT steps
-                'num_grids': 4,             # Number of grid levels per side
+                'num_grids': 3,             # Fewer grids so each order is larger
                 'fixed_stop_loss': 50,      # in USDT
                 'trail_stop_activate_grid': 2,
                 'trailing_stop_distance': 100,
             },
             'SOL/USDT:USDT': {
                 'balance_per_symbol': 15,  
-                'grid_distance': 10,        # Smaller step size for lower-priced asset
-                'num_grids': 2,             # Fewer grids to get larger order sizes
+                'grid_distance': 10,        # 10 USDT steps
+                'num_grids': 1,             # Only one grid level to get a larger order size
                 'fixed_stop_loss': 5,
                 'trail_stop_activate_grid': 1,
                 'trailing_stop_distance': 10,
             },
             'XRP/USDT:USDT': {
                 'balance_per_symbol': 15,  
-                'grid_distance': 1,         # Smaller step size in USDT terms
-                'num_grids': 2,             # Fewer grids increases order size per grid
+                'grid_distance': 0.1,       # Smaller step size for lower-priced XRP
+                'num_grids': 1,             # Single grid order to keep order size high
                 'fixed_stop_loss': 2,
                 'trail_stop_activate_grid': 1,
-                'trailing_stop_distance': 1,
+                'trailing_stop_distance': 0.1,
             },
         },
     }
+
 
 key_path = 'LiveTradingBots/secret.json'
 key_name = 'envelope'  # Change to your key name if needed
