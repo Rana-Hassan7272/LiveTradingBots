@@ -31,7 +31,7 @@ if strategy == 'scalping':
         'entry_ema_fast': 9,
         'entry_ema_slow': 21,
         'rsi_period': 14,
-        'rsi_overbought': 70,
+        'rsi_overbought': 60,
         'rsi_oversold': 30,
         # Exit Parameters
         'trailing_stop_distance': 6,  # in USD
