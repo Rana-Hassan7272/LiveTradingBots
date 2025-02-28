@@ -40,20 +40,27 @@ if strategy == 'scalping':
     }
 else:  # grid strategy
     params = {
-        'symbols': ['BTC/USDT:USDT', 'SOL/USDT:USDT', 'XRP/USDT:USDT'],
-        'timeframe': '1m',
-        'margin_mode': 'isolated',
-        'balance_per_symbol': 100,  # USD per symbol
-        'leverage': 2,
-        'grid_distance': 5,         # USD between grids (adjustable)
-        'num_grids': 4,             # Set to 4 for long and 4 for short (adjustable)
-        'fixed_stop_loss': 5,       # Fixed stop loss in USD (adjustable)
-        'trail_stop_activate_grid': 2,  # Activate trailing stop from 2nd grid (adjustable)
-        'trailing_stop_distance': 6,    # USD trailing stop (adjustable)
-        'trend_filter': True,
-        'trend_ema_period': 50,
-        'max_active_grids': 4,
-    }
+    'symbols': ['BTC/USDT:USDT', 'SOL/USDT:USDT', 'XRP/USDT:USDT'],
+    'timeframe': '1m',
+    'margin_mode': 'isolated',
+    # With a total of 50 USDT, dividing across 3 symbols gives roughly 15 USDT per symbol.
+    'balance_per_symbol': 15,  
+    'leverage': 2,
+    # Grid settings:
+    # For BTC (trading in the tens of thousands) a grid_distance of 100 USDT might be reasonable.
+    # For SOL and XRP (with much lower prices), a grid_distance of 100 USDT will push orders out of range.
+    # You may need to adjust these or run separate strategies per asset.
+    'grid_distance': 100,       # USD difference between grid levels (tuned for BTC)
+    'num_grids': 3,             # Number of grid levels per side
+    # Stop-loss and trailing stop settings (again, tuned for higher-priced assets like BTC)
+    'fixed_stop_loss': 50,      # USD fixed stop loss
+    'trail_stop_activate_grid': 2,  
+    'trailing_stop_distance': 100,  
+    'trend_filter': True,
+    'trend_ema_period': 50,
+    'max_active_grids': 3,
+}
+
 
 key_path = 'LiveTradingBots/secret.json'
 key_name = 'envelope'  # Change to your key name if needed
