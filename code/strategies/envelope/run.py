@@ -138,33 +138,37 @@ class ScalpingEngine:
                     self.trailing_stop = None
 
     def check_entries(self, data: pd.DataFrame, trend_direction: str):
-        if data is None or data.empty:
-            return
-        last_close = data['close'].iloc[-1]
-        if len(data) < 2:
-            return
+    if data is None or data.empty:
+        return
+    last_close = data['close'].iloc[-1]
+    if len(data) < 2:
+        return
 
-        # EMA crossover condition: fast EMA crosses above slow EMA
-        ema_crossover = (data['ema_fast'].iloc[-2] < data['ema_slow'].iloc[-2] and 
-                         data['ema_fast'].iloc[-1] > data['ema_slow'].iloc[-1])
-        rsi_value = data['rsi'].iloc[-1]
+    # EMA crossover condition: fast EMA crosses above slow EMA
+    ema_crossover = (data['ema_fast'].iloc[-2] < data['ema_slow'].iloc[-2] and 
+                     data['ema_fast'].iloc[-1] > data['ema_slow'].iloc[-1])
+    rsi_value = data['rsi'].iloc[-1]
 
-        if params.get('use_trend_filter'):
-            if trend_direction == 'bullish' and not ema_crossover:
-                if rsi_value > params['rsi_oversold']:
-                    print(f"[{self.symbol}] Bullish trend but RSI not oversold for long entry.")
-                    return
-            elif trend_direction == 'bearish' and ema_crossover:
-                if rsi_value < params['rsi_overbought']:
-                    print(f"[{self.symbol}] Bearish trend but RSI not overbought for short entry.")
-                    return
+    if params.get('use_trend_filter'):
+        if trend_direction == 'bullish' and not ema_crossover:
+            # Relax condition: allow long entry if RSI is below (rsi_oversold + 10)
+            if rsi_value > (params['rsi_oversold'] + 10):
+                print(f"[{self.symbol}] Bullish trend but RSI not low enough for long entry. (RSI: {rsi_value})")
+                return
+        elif trend_direction == 'bearish' and ema_crossover:
+            # Relax condition: allow short entry if RSI is above (rsi_overbought - 10)
+            if rsi_value < (params['rsi_overbought'] - 10):
+                print(f"[{self.symbol}] Bearish trend but RSI not high enough for short entry. (RSI: {rsi_value})")
+                return
 
-        if ema_crossover and rsi_value < params['rsi_oversold']:
-            self.enter_trade('long', last_close)
-        elif (not ema_crossover) and rsi_value > params['rsi_overbought']:
-            self.enter_trade('short', last_close)
-        else:
-            print(f"[{self.symbol}] No entry signal based on EMA crossover and RSI conditions.")
+    # Use the relaxed RSI thresholds in the final entry condition as well
+    if ema_crossover and rsi_value < (params['rsi_oversold'] + 10):
+        self.enter_trade('long', last_close)
+    elif (not ema_crossover) and rsi_value > (params['rsi_overbought'] - 10):
+        self.enter_trade('short', last_close)
+    else:
+        print(f"[{self.symbol}] No entry signal based on EMA crossover and RSI conditions.")
+
 
     def enter_trade(self, side: str, entry_price: float):
         try:
