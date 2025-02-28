@@ -40,26 +40,51 @@ if strategy == 'scalping':
     }
 else:  # grid strategy
     params = {
-    'symbols': ['BTC/USDT:USDT', 'SOL/USDT:USDT', 'XRP/USDT:USDT'],
-    'timeframe': '1m',
-    'margin_mode': 'isolated',
-    # With a total of 50 USDT, dividing across 3 symbols gives roughly 15 USDT per symbol.
-    'balance_per_symbol': 15,  
-    'leverage': 2,
-    # Grid settings:
-    # For BTC (trading in the tens of thousands) a grid_distance of 100 USDT might be reasonable.
-    # For SOL and XRP (with much lower prices), a grid_distance of 100 USDT will push orders out of range.
-    # You may need to adjust these or run separate strategies per asset.
-    'grid_distance': 100,       # USD difference between grid levels (tuned for BTC)
-    'num_grids': 3,             # Number of grid levels per side
-    # Stop-loss and trailing stop settings (again, tuned for higher-priced assets like BTC)
-    'fixed_stop_loss': 50,      # USD fixed stop loss
-    'trail_stop_activate_grid': 2,  
-    'trailing_stop_distance': 100,  
-    'trend_filter': True,
-    'trend_ema_period': 50,
-    'max_active_grids': 3,
-}
+        'symbols': ['BTC/USDT:USDT', 'SOL/USDT:USDT', 'XRP/USDT:USDT'],
+        'timeframe': '1m',
+        'margin_mode': 'isolated',
+        'leverage': 2,
+        'trend_filter': True,
+        'trend_ema_period': 50,
+        'max_active_grids': 3,
+        # Define symbol-specific grid settings:
+        'grid_settings': {
+            'BTC/USDT:USDT': {
+                # With ~15 USDT allocated per symbol and leverage 2,
+                # we have about 30 USDT margin. Dividing by 4 grids yields ~7.5 USDT per order.
+                # At BTC prices (~84000 USDT), order amount = ~7.5/84000 = 0.000089 BTC.
+                'balance_per_symbol': 15,  
+                'grid_distance': 100,       # 100 USDT differences between grid levels
+                'num_grids': 4,             # More grids help reduce each order's size
+                'fixed_stop_loss': 50,      # in USDT
+                'trail_stop_activate_grid': 2,
+                'trailing_stop_distance': 100,
+            },
+            'SOL/USDT:USDT': {
+                # SOL trades at a much lower price. To meet the minimum order of ~0.1 SOL,
+                # we need a larger USDT value per order.
+                # For example, if SOL is ~250 USDT, an order of 0.1 SOL costs 25 USDT.
+                # With only ~15 USDT allocated per symbol, you may not meet the minimum.
+                # You can try increasing balance or using fewer grids.
+                'balance_per_symbol': 15,  
+                'grid_distance': 10,       # A smaller grid step in USDT terms
+                'num_grids': 2,            # Fewer grids gives a larger order per grid
+                'fixed_stop_loss': 5,
+                'trail_stop_activate_grid': 1,
+                'trailing_stop_distance': 10,
+            },
+            'XRP/USDT:USDT': {
+                # XRP’s price on Bitget might be in the tens or low hundreds.
+                # To ensure an order meets the minimum (typically 1 XRP), adjust grid settings.
+                'balance_per_symbol': 15,  
+                'grid_distance': 1,        # Smaller step size in USDT
+                'num_grids': 2,            # Fewer grids increases order size per grid
+                'fixed_stop_loss': 2,
+                'trail_stop_activate_grid': 1,
+                'trailing_stop_distance': 1,
+            },
+        },
+    }
 
 
 key_path = 'LiveTradingBots/secret.json'
