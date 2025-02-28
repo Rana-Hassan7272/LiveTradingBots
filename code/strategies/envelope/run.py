@@ -25,7 +25,7 @@ if strategy == 'scalping':
         'risk_per_trade': 0.02,
         # Trend Filter
         'use_trend_filter': True,
-        'trend_timeframe': '3m',
+        'trend_timeframe': '5m',
         'trend_ema_period': 30,
         # Entry Parameters
         'entry_ema_fast': 9,
