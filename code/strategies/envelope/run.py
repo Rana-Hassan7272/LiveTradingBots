@@ -39,6 +39,7 @@ if strategy == 'scalping':
         'max_trade_duration': 300,    # in seconds
     }
 else:  # grid strategy
+    # Global grid strategy parameters and symbol-specific settings
     params = {
         'symbols': ['BTC/USDT:USDT', 'SOL/USDT:USDT', 'XRP/USDT:USDT'],
         'timeframe': '1m',
@@ -50,42 +51,31 @@ else:  # grid strategy
         # Define symbol-specific grid settings:
         'grid_settings': {
             'BTC/USDT:USDT': {
-                # With ~15 USDT allocated per symbol and leverage 2,
-                # we have about 30 USDT margin. Dividing by 4 grids yields ~7.5 USDT per order.
-                # At BTC prices (~84000 USDT), order amount = ~7.5/84000 = 0.000089 BTC.
                 'balance_per_symbol': 15,  
-                'grid_distance': 100,       # 100 USDT differences between grid levels
-                'num_grids': 4,             # More grids help reduce each order's size
+                'grid_distance': 100,       # 100 USDT steps
+                'num_grids': 4,             # Number of grid levels per side
                 'fixed_stop_loss': 50,      # in USDT
                 'trail_stop_activate_grid': 2,
                 'trailing_stop_distance': 100,
             },
             'SOL/USDT:USDT': {
-                # SOL trades at a much lower price. To meet the minimum order of ~0.1 SOL,
-                # we need a larger USDT value per order.
-                # For example, if SOL is ~250 USDT, an order of 0.1 SOL costs 25 USDT.
-                # With only ~15 USDT allocated per symbol, you may not meet the minimum.
-                # You can try increasing balance or using fewer grids.
                 'balance_per_symbol': 15,  
-                'grid_distance': 10,       # A smaller grid step in USDT terms
-                'num_grids': 2,            # Fewer grids gives a larger order per grid
+                'grid_distance': 10,        # Smaller step size for lower-priced asset
+                'num_grids': 2,             # Fewer grids to get larger order sizes
                 'fixed_stop_loss': 5,
                 'trail_stop_activate_grid': 1,
                 'trailing_stop_distance': 10,
             },
             'XRP/USDT:USDT': {
-                # XRP’s price on Bitget might be in the tens or low hundreds.
-                # To ensure an order meets the minimum (typically 1 XRP), adjust grid settings.
                 'balance_per_symbol': 15,  
-                'grid_distance': 1,        # Smaller step size in USDT
-                'num_grids': 2,            # Fewer grids increases order size per grid
+                'grid_distance': 1,         # Smaller step size in USDT terms
+                'num_grids': 2,             # Fewer grids increases order size per grid
                 'fixed_stop_loss': 2,
                 'trail_stop_activate_grid': 1,
                 'trailing_stop_distance': 1,
             },
         },
     }
-
 
 key_path = 'LiveTradingBots/secret.json'
 key_name = 'envelope'  # Change to your key name if needed
@@ -247,7 +237,7 @@ class ScalpingEngine:
         except Exception as e:
             print(f"[{self.symbol}] Error placing take profit order: {e}")
 
-# --- Grid Trader (Using Modified Features) ---
+# --- Grid Trader (Using Modified Features with Symbol-Specific Settings) ---
 class GridTrader:
     def __init__(self, symbol):
         self.symbol = symbol
@@ -256,21 +246,24 @@ class GridTrader:
         self.position = None
         self.trailing_stop = None
         self.last_price = None
-        self.fixed_stop_order_placed = False  # New flag to track fixed stop loss order
+        self.fixed_stop_order_placed = False  # Flag to track fixed stop loss order
 
     def calculate_grids(self, current_price):
-        # Create grid levels based on the current price
-        self.grids['long'] = [round(current_price + i * params['grid_distance'], 1) 
-                              for i in range(1, params['num_grids'] + 1)]
-        self.grids['short'] = [round(current_price - i * params['grid_distance'], 1) 
-                               for i in range(1, params['num_grids'] + 1)]
+        symbol_params = params['grid_settings'].get(self.symbol, {})
+        grid_distance = symbol_params.get('grid_distance', 100)
+        num_grids = symbol_params.get('num_grids', 4)
+        self.grids['long'] = [round(current_price + i * grid_distance, 1) for i in range(1, num_grids + 1)]
+        self.grids['short'] = [round(current_price - i * grid_distance, 1) for i in range(1, num_grids + 1)]
 
     def place_grid_orders(self):
         self.cancel_all_orders()
-        balance = params['balance_per_symbol'] * params['leverage']
-        grid_size = balance / params['num_grids']
+        symbol_params = params['grid_settings'].get(self.symbol, {})
+        balance_per_symbol = symbol_params.get('balance_per_symbol', 15)
+        num_grids = symbol_params.get('num_grids', 4)
+        balance = balance_per_symbol * params['leverage']
+        grid_size = balance / num_grids
         
-        # Place orders only on the activated side based on market trend
+        # Place orders for the long side
         for price in self.grids['long'][:params['max_active_grids']]:
             try:
                 order = bitget.place_limit_order(
@@ -284,6 +277,7 @@ class GridTrader:
             except Exception as e:
                 print(f"[{self.symbol}] Error placing long order: {e}")
         
+        # Place orders for the short side
         for price in self.grids['short'][:params['max_active_grids']]:
             try:
                 order = bitget.place_limit_order(
@@ -310,7 +304,7 @@ class GridTrader:
         positions = bitget.fetch_open_positions(self.symbol)
         if positions:
             self.position = positions[0]
-            # Once a grid order is filled, immediately place a fixed stop loss if not done already.
+            # Once a grid order is filled, place a fixed stop loss if not already set.
             if not self.fixed_stop_order_placed:
                 self.place_fixed_stop_loss()
             self.update_stop_management()
@@ -320,15 +314,15 @@ class GridTrader:
             try:
                 entry_price = float(self.position['entryPrice'])
                 side = self.position['side']
-                fixed_stop = params.get('fixed_stop_loss', 5)
+                symbol_params = params['grid_settings'].get(self.symbol, {})
+                fixed_stop = symbol_params.get('fixed_stop_loss', 50)
                 if side == 'long':
                     stop_price = entry_price - fixed_stop
                     order_side = 'sell'
                 else:
                     stop_price = entry_price + fixed_stop
                     order_side = 'buy'
-                # Place a trigger market order as fixed stop loss.
-                # Using the contract/amount from position if available.
+                # Place trigger market order as fixed stop loss.
                 amount = self.position.get('contracts', None)
                 if amount is None:
                     print(f"[{self.symbol}] Unable to place fixed stop loss: missing contract amount.")
@@ -350,24 +344,27 @@ class GridTrader:
         if self.position:
             current_price = float(self.position['markPrice'])
             entry_price = float(self.position['entryPrice'])
-            # Recalculate grid levels based on entry price for trailing stop reference
+            symbol_params = params['grid_settings'].get(self.symbol, {})
+            grid_distance = symbol_params.get('grid_distance', 100)
+            num_grids = symbol_params.get('num_grids', 4)
             grid_levels = []
             if self.position['side'] == 'long':
-                grid_levels = [entry_price + i * params['grid_distance'] for i in range(1, params['num_grids'] + 1)]
+                grid_levels = [entry_price + i * grid_distance for i in range(1, num_grids + 1)]
             else:
-                grid_levels = [entry_price - i * params['grid_distance'] for i in range(1, params['num_grids'] + 1)]
+                grid_levels = [entry_price - i * grid_distance for i in range(1, num_grids + 1)]
             
             current_grid = None
             for i, level in enumerate(grid_levels):
                 if (self.position['side'] == 'long' and current_price >= level) or \
                    (self.position['side'] == 'short' and current_price <= level):
                     current_grid = i + 1
-            # Activate trailing stop only when current grid >= the activation threshold.
-            if current_grid and current_grid >= params['trail_stop_activate_grid']:
+            trailing_stop_distance = symbol_params.get('trailing_stop_distance', 100)
+            if current_grid and current_grid >= symbol_params.get('trail_stop_activate_grid', 2):
                 if not self.trailing_stop or current_price > self.trailing_stop['peak_price']:
                     self.trailing_stop = {
                         'peak_price': current_price,
-                        'stop_price': current_price - params['trailing_stop_distance'] if self.position['side'] == 'long' else current_price + params['trailing_stop_distance']
+                        'stop_price': current_price - trailing_stop_distance if self.position['side'] == 'long'
+                                      else current_price + trailing_stop_distance
                     }
                     print(f"[{self.symbol}] Activated/Updated trailing stop from grid {current_grid}: {self.trailing_stop}")
     
@@ -486,4 +483,3 @@ if __name__ == "__main__":
             print(f"Unhandled exception in run_bot: {e}")
         print("Restarting bot in 10 seconds...")
         time.sleep(10)
-
