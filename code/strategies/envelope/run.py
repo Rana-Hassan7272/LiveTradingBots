@@ -25,14 +25,14 @@ if strategy == 'scalping':
         'risk_per_trade': 0.02,
         # Trend Filter
         'use_trend_filter': True,
-        'trend_timeframe': '5m',
-        'trend_ema_period': 50,
+        'trend_timeframe': '3m',
+        'trend_ema_period': 30,
         # Entry Parameters
         'entry_ema_fast': 9,
         'entry_ema_slow': 21,
         'rsi_period': 14,
-        'rsi_overbought': 80,
-        'rsi_oversold': 70,
+        'rsi_overbought': 65,
+        'rsi_oversold': 35,
         # Exit Parameters
         'trailing_stop_distance': 6,  # in USD
         'take_profit_ratio': 1.5,     # Ratio relative to stop distance
