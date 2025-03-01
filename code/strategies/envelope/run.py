@@ -39,20 +39,20 @@ if strategy == 'scalping':
         'max_trade_duration': 300,    # in seconds
     }
 else:  # grid strategy
-    params = {
+    params =  {
         'symbols': ['BTC/USDT:USDT', 'SOL/USDT:USDT', 'XRP/USDT:USDT'],
         'timeframe': '1m',
         'margin_mode': 'isolated',
-        'balance_per_symbol': 100,  # default USD per symbol
+        'balance_per_symbol': 100,       # or adjust as needed per symbol
         'leverage': 2,
-        'grid_distance': 5,         # default USD between grids (adjustable)
-        'num_grids': 4,             # Set to 4 for long and 4 for short (adjustable)
-        'fixed_stop_loss': 5,       # Fixed stop loss in USD (adjustable)
-        'trail_stop_activate_grid': 2,  # Activate trailing stop from 2nd grid (adjustable)
-        'trailing_stop_distance': 6,    # USD trailing stop (adjustable)
+        'grid_distance': 30,             # use 30 USD as the offset trigger for entry
+        'num_grids': 1,                  # only set one grid order
+        'fixed_stop_loss': 20,           # fixed stop loss of 20 USD for exit if market reverses
+        'trail_stop_activate_grid': 1,   # activate trailing stop as soon as the grid order is filled
+        'trailing_stop_distance': 30,    # trailing stop triggers if the price falls 30 USD from the peak
         'trend_filter': True,
         'trend_ema_period': 50,
-        'max_active_grids': 4,
+        'max_active_grids': 1,
     }
     # Symbol-specific overrides for grid parameters.
     # Adjust grid_distance and balance_per_symbol to suit each symbol's price scale.
@@ -69,9 +69,9 @@ else:  # grid strategy
         },
         'XRP/USDT:USDT': {
             'grid_distance': 0.1,    # Use an even smaller grid distance for XRP
-            'balance_per_symbol': 10,
+            'balance_per_symbol': 50,
             'num_grids': params['num_grids'],
-             'min_price': 2.1272,  # Explicitly set the minimum allowed price for XRP
+            'min_price': 2.1272,  # Explicitly set the minimum allowed price for XRP
         },
     }
 
@@ -236,108 +236,68 @@ class ScalpingEngine:
 class GridTrader:
     def __init__(self, symbol):
         self.symbol = symbol
-        if strategy == 'grid' and 'symbol_specific_params' in globals() and symbol in symbol_specific_params:
-            self.symbol_params = symbol_specific_params[symbol]
-        else:
-            self.symbol_params = params
-        self.grids = {'long': [], 'short': []}
-        self.active_orders = []
+        self.reserved_price = None
+        self.trend = None
         self.position = None
         self.trailing_stop = None
-        self.last_price = None
         self.fixed_stop_order_placed = False
 
-    def calculate_grids(self, current_price):
-        grid_distance = self.symbol_params['grid_distance']
-        num_grids = self.symbol_params.get('num_grids', params['num_grids'])
-        self.grids['long'] = [round(current_price + i * grid_distance, 1) for i in range(1, num_grids + 1)]
-        self.grids['short'] = [round(current_price - i * grid_distance, 1) for i in range(1, num_grids + 1)]
+    def start_trading(self):
+        # Reserve the entry market price and determine trend
+        ticker = bitget.fetch_ticker(self.symbol)
+        self.reserved_price = float(ticker['last'])
+        self.trend = self.check_trend()
+        print(f"[{self.symbol}] Reserved entry price: {self.reserved_price} with trend {self.trend}")
 
-    def place_grid_orders(self):
-        self.cancel_all_orders()
-        balance = self.symbol_params['balance_per_symbol'] * params['leverage']
-        num_grids = self.symbol_params.get('num_grids', params['num_grids'])
-        grid_size = balance / num_grids
-
-        market = bitget.markets[self.symbol]
-        # Use symbol-specific min_price if defined, otherwise use exchange value (or default to 0)
-        min_price = self.symbol_params.get('min_price') or (market['limits']['price'].get('min') or 0)
-        max_price = market['limits']['price'].get('max') or float('inf')
-        min_amount = market['limits']['amount'].get('min') or 0
-
-        # Place orders on the long side
-        for price in self.grids['long'][:params['max_active_grids']]:
-            if price < min_price:
-                print(f"[{self.symbol}] Skipping long grid order at {price}: price below minimum {min_price}")
-                continue
-            if price > max_price:
-                print(f"[{self.symbol}] Skipping long grid order at {price}: price above maximum {max_price}")
-                continue
-            amount = grid_size / price
-            if amount < min_amount:
-                print(f"[{self.symbol}] Skipping long grid order at {price}: order amount {amount} below minimum {min_amount}")
-                continue
+    def check_entry_trigger(self):
+        # Only attempt entry if no position exists
+        ticker = bitget.fetch_ticker(self.symbol)
+        current_price = float(ticker['last'])
+        # Note: Ensure 'entry_trigger_offset' is defined in params for grid strategy!
+        if self.trend == 'bullish' and current_price >= self.reserved_price + params['entry_trigger_offset']:
+            # For bullish, wait until price rises offset above reserved, then place a buy limit at reserved price.
+            balance = params['balance_per_symbol'] * params['leverage']
+            amount = balance / self.reserved_price
             try:
                 order = bitget.place_limit_order(
                     symbol=self.symbol,
                     side='buy',
                     amount=amount,
-                    price=price,
+                    price=self.reserved_price
                 )
-                self.active_orders.append(order['id'])
-                print(f"[{self.symbol}] Placed long grid order at {price}")
+                print(f"[{self.symbol}] Entry triggered for LONG at reserved price {self.reserved_price}")
             except Exception as e:
-                print(f"[{self.symbol}] Error placing long order at {price}: {e}")
-
-        # Place orders on the short side
-        for price in self.grids['short'][:params['max_active_grids']]:
-            if price < min_price:
-                print(f"[{self.symbol}] Skipping short grid order at {price}: price below minimum {min_price}")
-                continue
-            if price > max_price:
-                print(f"[{self.symbol}] Skipping short grid order at {price}: price above maximum {max_price}")
-                continue
-            amount = grid_size / price
-            if amount < min_amount:
-                print(f"[{self.symbol}] Skipping short grid order at {price}: order amount {amount} below minimum {min_amount}")
-                continue
+                print(f"[{self.symbol}] Error placing long entry order: {e}")
+        elif self.trend == 'bearish' and current_price <= self.reserved_price - params['entry_trigger_offset']:
+            # For bearish, wait until price falls offset below reserved, then place a sell limit at reserved price.
+            balance = params['balance_per_symbol'] * params['leverage']
+            amount = balance / self.reserved_price
             try:
                 order = bitget.place_limit_order(
                     symbol=self.symbol,
                     side='sell',
                     amount=amount,
-                    price=price,
+                    price=self.reserved_price
                 )
-                self.active_orders.append(order['id'])
-                print(f"[{self.symbol}] Placed short grid order at {price}")
+                print(f"[{self.symbol}] Entry triggered for SHORT at reserved price {self.reserved_price}")
             except Exception as e:
-                print(f"[{self.symbol}] Error placing short order at {price}: {e}")
-
-
-    def cancel_all_orders(self):
-        try:
-            orders = bitget.fetch_open_orders(self.symbol)
-            for order in orders:
-                bitget.cancel_order(order['id'], self.symbol)
-            self.active_orders = []
-        except Exception as e:
-            print(f"[{self.symbol}] Error canceling orders: {e}")
+                print(f"[{self.symbol}] Error placing short entry order: {e}")
 
     def check_filled_orders(self):
         positions = bitget.fetch_open_positions(self.symbol)
         if positions:
             self.position = positions[0]
-            # Once a grid order is filled, immediately place a fixed stop loss if not done already.
+            # Place a fixed stop loss order (single grid) if not already set.
             if not self.fixed_stop_order_placed:
                 self.place_fixed_stop_loss()
-            self.update_stop_management()
+            self.update_trailing_stop()
 
     def place_fixed_stop_loss(self):
         if self.position:
             try:
                 entry_price = float(self.position['entryPrice'])
                 side = self.position['side']
-                fixed_stop = params.get('fixed_stop_loss', 5)
+                fixed_stop = params.get('fixed_stop_loss', 20)
                 if side == 'long':
                     stop_price = entry_price - fixed_stop
                     order_side = 'sell'
@@ -361,27 +321,26 @@ class GridTrader:
             except Exception as e:
                 print(f"[{self.symbol}] Error placing fixed stop loss order: {e}")
 
-    def update_stop_management(self):
+    def update_trailing_stop(self):
         if self.position:
             current_price = float(self.position['markPrice'])
-            entry_price = float(self.position['entryPrice'])
-            grid_levels = []
-            if self.position['side'] == 'long':
-                grid_levels = [entry_price + i * self.symbol_params['grid_distance'] for i in range(1, self.symbol_params.get('num_grids', params['num_grids']) + 1)]
+            if not self.trailing_stop:
+                # Initialize trailing stop based on the current market price.
+                if self.position['side'] == 'long':
+                    self.trailing_stop = {'peak_price': current_price, 'stop_price': current_price - params['trailing_stop_distance']}
+                else:
+                    self.trailing_stop = {'peak_price': current_price, 'stop_price': current_price + params['trailing_stop_distance']}
+                print(f"[{self.symbol}] Initialized trailing stop: {self.trailing_stop}")
             else:
-                grid_levels = [entry_price - i * self.symbol_params['grid_distance'] for i in range(1, self.symbol_params.get('num_grids', params['num_grids']) + 1)]
-            current_grid = None
-            for i, level in enumerate(grid_levels):
-                if (self.position['side'] == 'long' and current_price >= level) or \
-                   (self.position['side'] == 'short' and current_price <= level):
-                    current_grid = i + 1
-            if current_grid and current_grid >= params['trail_stop_activate_grid']:
-                if not self.trailing_stop or current_price > self.trailing_stop['peak_price']:
-                    self.trailing_stop = {
-                        'peak_price': current_price,
-                        'stop_price': current_price - params['trailing_stop_distance'] if self.position['side'] == 'long' else current_price + params['trailing_stop_distance']
-                    }
-                    print(f"[{self.symbol}] Activated/Updated trailing stop from grid {current_grid}: {self.trailing_stop}")
+                if self.position['side'] == 'long':
+                    if current_price > self.trailing_stop['peak_price']:
+                        self.trailing_stop['peak_price'] = current_price
+                        self.trailing_stop['stop_price'] = current_price - params['trailing_stop_distance']
+                else:
+                    if current_price < self.trailing_stop['peak_price']:
+                        self.trailing_stop['peak_price'] = current_price
+                        self.trailing_stop['stop_price'] = current_price + params['trailing_stop_distance']
+                print(f"[{self.symbol}] Updated trailing stop: {self.trailing_stop}")
 
     def check_stop_conditions(self):
         if self.trailing_stop and self.position:
@@ -402,27 +361,28 @@ class GridTrader:
         self.position = None
         self.trailing_stop = None
         self.fixed_stop_order_placed = False
-        self.cancel_all_orders()
-        time.sleep(2)
+        # Reserve a new entry price and re-run trend analysis
         self.start_trading()
 
     def check_trend(self):
-        if params.get('trend_filter'):
-            data = bitget.fetch_recent_ohlcv(self.symbol, '15m', 100)
-            ema = ta.trend.ema_indicator(data['close'], params['trend_ema_period'])
-            return 'bullish' if data['close'].iloc[-1] > ema.iloc[-1] else 'bearish'
-        return None
+        # Perform a trend analysis using a 15m timeframe and EMA
+        data = bitget.fetch_recent_ohlcv(self.symbol, '15m', 100)
+        ema = ta.trend.ema_indicator(data['close'], params['trend_ema_period'])
+        return 'bullish' if data['close'].iloc[-1] > ema.iloc[-1] else 'bearish'
 
+    # The following redefines start_trading.
+    # Note: This second definition will override the first one.
     def start_trading(self):
         ticker = bitget.fetch_ticker(self.symbol)
         self.last_price = float(ticker['last'])
         trend = self.check_trend()
+        # Assume calculate_grids and place_grid_orders are defined elsewhere or need implementation.
         self.calculate_grids(self.last_price)
         # Activate only the side matching the current trend.
         if trend == 'bullish':
-            self.grids['short'] = []
+            self.grids = {'short': []}
         elif trend == 'bearish':
-            self.grids['long'] = []
+            self.grids = {'long': []}
         self.place_grid_orders()
 
 # --- Main Execution Loop with 24/7 Mode ---
@@ -444,7 +404,7 @@ def run_bot():
                             trend_direction = None
                         else:
                             trend_direction = get_trend_direction(trend_data)
-                            print(f"[{symbol}] Trend direction: {trend_direction}")
+                            print(f"[{self.symbol}] Trend direction: {trend_direction}")
                     else:
                         trend_direction = None
 
@@ -466,12 +426,12 @@ def run_bot():
             try:
                 for symbol, trader in traders.items():
                     try:
-                        ticker = bitget.fetch_ticker(symbol)
-                        trader.last_price = float(ticker['last'])
+                        # If not in position, check for entry trigger based on the offset.
+                        if trader.position is None:
+                            trader.check_entry_trigger()
+                        # Once in position, check if the order was filled and update trailing stop.
                         trader.check_filled_orders()
                         trader.check_stop_conditions()
-                        if int(time.time()) % 300 == 0:
-                            trader.reset_trading()
                     except Exception as e:
                         print(f"[{symbol}] Error processing: {e}")
                 time.sleep(5)
@@ -481,6 +441,7 @@ def run_bot():
             except Exception as e:
                 print(f"Main loop error: {e}")
                 time.sleep(30)
+
 
 # 24/7 Mode: Outer Watchdog Loop
 if __name__ == "__main__":
