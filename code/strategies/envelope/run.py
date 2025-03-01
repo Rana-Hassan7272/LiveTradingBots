@@ -12,7 +12,7 @@ from utilities.bitget_futures import BitgetFutures
 
 # --- CONFIGURATION ---
 # Choose strategy: 'scalping' or 'grid'
-strategy = 'scalping'  # Change to 'grid' to run the grid strategy
+strategy = 'grid'  # Change to 'grid' to run the grid strategy
 
 if strategy == 'scalping':
     # Scalping parameters for multiple symbols
