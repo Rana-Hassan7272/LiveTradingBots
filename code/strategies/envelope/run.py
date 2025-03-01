@@ -12,7 +12,7 @@ from utilities.bitget_futures import BitgetFutures
 
 # --- CONFIGURATION ---
 # Choose strategy: 'scalping' or 'grid'
-strategy = 'grid'  # Change to 'grid' to run the grid strategy
+strategy = 'scalping'  # Change to 'grid' to run the grid strategy
 
 if strategy == 'scalping':
     # Scalping parameters for multiple symbols
@@ -53,27 +53,30 @@ else:  # grid strategy
         'trend_filter': True,
         'trend_ema_period': 50,
         'max_active_grids': 1,
-        # New parameter for reservation trigger
+        # Default reservation trigger (for BTC)
         'reservation_trigger': 30,  # in USD; wait for this price movement before activating grid orders
     }
     # Symbol-specific overrides for grid parameters.
-    # Adjust grid_distance and balance_per_symbol to suit each symbol's price scale.
+    # Adjust grid_distance, balance_per_symbol, and reservation_trigger to suit each symbol's price scale.
     symbol_specific_params = {
         'BTC/USDT:USDT': {
             'grid_distance': 5,      # Use 5 USD for BTC
             'balance_per_symbol': 100,
             'num_grids': params['num_grids']
+            # BTC uses default reservation_trigger of 30 USD
         },
         'SOL/USDT:USDT': {
             'grid_distance': 0.5,    # Use a smaller grid distance for SOL
             'balance_per_symbol': 50,
-            'num_grids': params['num_grids']
+            'num_grids': params['num_grids'],
+            'reservation_trigger': 1.0,  # Lower absolute trigger for SOL
         },
         'XRP/USDT:USDT': {
             'grid_distance': 0.1,    # Use an even smaller grid distance for XRP
             'balance_per_symbol': 50,
             'num_grids': params['num_grids'],
             'min_price': 2.1272,       # Explicit minimum price for XRP orders
+            'reservation_trigger': 0.1,  # Lower trigger for XRP
         },
     }
 
@@ -252,6 +255,8 @@ class GridTrader:
         self.reserved_price = None
         self.reservation_activated = False
         self.active_side = None  # 'long' or 'short'
+        # Use symbol-specific reservation trigger if available
+        self.reservation_trigger = self.symbol_params.get('reservation_trigger', params.get('reservation_trigger', 30))
 
     def calculate_grids(self, base_price):
         grid_distance = self.symbol_params['grid_distance']
@@ -454,7 +459,7 @@ class GridTrader:
             return
         ticker = bitget.fetch_ticker(self.symbol)
         current_price = float(ticker['last'])
-        trigger = params.get('reservation_trigger', 30)
+        trigger = self.reservation_trigger
         if current_price >= self.reserved_price + trigger:
             # Activate long side orders
             self.reservation_activated = True
@@ -547,3 +552,4 @@ if __name__ == "__main__":
             print(f"Unhandled exception in run_bot: {e}")
         print("Restarting bot in 10 seconds...")
         time.sleep(10)
+
