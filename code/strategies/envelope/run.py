@@ -12,7 +12,7 @@ from utilities.bitget_futures import BitgetFutures
 
 # --- CONFIGURATION ---
 # Choose strategy: 'scalping' or 'grid'
-strategy = 'scalping'  # Change to 'grid' to run the grid strategy
+strategy = 'grid'  # Change to 'grid' to run the grid strategy
 
 if strategy == 'scalping':
     # Scalping parameters for multiple symbols
@@ -70,7 +70,8 @@ else:  # grid strategy
         'XRP/USDT:USDT': {
             'grid_distance': 0.1,    # Use an even smaller grid distance for XRP
             'balance_per_symbol': 10,
-            'num_grids': params['num_grids']
+            'num_grids': params['num_grids'],
+             'min_price': 2.1272,  # Explicitly set the minimum allowed price for XRP
         },
     }
 
@@ -235,7 +236,6 @@ class ScalpingEngine:
 class GridTrader:
     def __init__(self, symbol):
         self.symbol = symbol
-        # Use symbol-specific parameters if defined; otherwise, fall back to generic grid params.
         if strategy == 'grid' and 'symbol_specific_params' in globals() and symbol in symbol_specific_params:
             self.symbol_params = symbol_specific_params[symbol]
         else:
@@ -245,7 +245,7 @@ class GridTrader:
         self.position = None
         self.trailing_stop = None
         self.last_price = None
-        self.fixed_stop_order_placed = False  # flag to track fixed stop loss order
+        self.fixed_stop_order_placed = False
 
     def calculate_grids(self, current_price):
         grid_distance = self.symbol_params['grid_distance']
@@ -259,9 +259,9 @@ class GridTrader:
         num_grids = self.symbol_params.get('num_grids', params['num_grids'])
         grid_size = balance / num_grids
 
-        # Get market limits from the Bitget session and set defaults if None
         market = bitget.markets[self.symbol]
-        min_price = market['limits']['price'].get('min') or 0
+        # Use symbol-specific min_price if defined, otherwise use exchange value (or default to 0)
+        min_price = self.symbol_params.get('min_price') or (market['limits']['price'].get('min') or 0)
         max_price = market['limits']['price'].get('max') or float('inf')
         min_amount = market['limits']['amount'].get('min') or 0
 
@@ -312,6 +312,7 @@ class GridTrader:
                 print(f"[{self.symbol}] Placed short grid order at {price}")
             except Exception as e:
                 print(f"[{self.symbol}] Error placing short order at {price}: {e}")
+
 
     def cancel_all_orders(self):
         try:
