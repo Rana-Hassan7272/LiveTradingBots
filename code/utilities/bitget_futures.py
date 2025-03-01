@@ -3,13 +3,16 @@ import time
 import pandas as pd
 from typing import Any, Optional, Dict, List
 
+
 class BitgetFutures():
     def __init__(self, api_setup: Optional[Dict[str, Any]] = None) -> None:
-        if api_setup == None:
+
+        if api_setup is None:
             self.session = ccxt.bitget()
         else:
             api_setup.setdefault("options", {"defaultType": "future"})
             self.session = ccxt.bitget(api_setup)
+
         self.markets = self.session.load_markets()
   
     def fetch_ticker(self, symbol: str) -> Dict[str, Any]:
