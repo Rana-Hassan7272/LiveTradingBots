@@ -259,11 +259,11 @@ class GridTrader:
         num_grids = self.symbol_params.get('num_grids', params['num_grids'])
         grid_size = balance / num_grids
 
-        # Get market limits from the Bitget session
+        # Get market limits from the Bitget session and set defaults if None
         market = bitget.markets[self.symbol]
-        min_price = market['limits']['price'].get('min', 0)
-        max_price = market['limits']['price'].get('max', float('inf'))
-        min_amount = market['limits']['amount'].get('min', 0)
+        min_price = market['limits']['price'].get('min') or 0
+        max_price = market['limits']['price'].get('max') or float('inf')
+        min_amount = market['limits']['amount'].get('min') or 0
 
         # Place orders on the long side
         for price in self.grids['long'][:params['max_active_grids']]:
@@ -493,4 +493,5 @@ if __name__ == "__main__":
             print(f"Unhandled exception in run_bot: {e}")
         print("Restarting bot in 10 seconds...")
         time.sleep(10)
+
 
