@@ -198,18 +198,7 @@ class ScalpingEngine:
         if len(data) < 2:
             return
 
-        # Compute ADX to filter out entries in strong trending markets
-        try:
-            adx_series = ta.trend.adx(data['high'], data['low'], data['close'], window=14)
-            adx_value = adx_series.iloc[-1]
-            print(f"[{self.symbol}] ADX value: {adx_value}")
-        except Exception as e:
-            print(f"[{self.symbol}] Error calculating ADX: {e}")
-            adx_value = 0
-
-        if adx_value >= 25:
-            print(f"[{self.symbol}] Strong trend detected (ADX {adx_value}), skipping entry.")
-            return
+        # Removed ADX filter
 
         # EMA crossover condition: fast EMA crosses above slow EMA
         ema_crossover = (data['ema_fast'].iloc[-2] < data['ema_slow'].iloc[-2] and 
@@ -659,4 +648,3 @@ if __name__ == "__main__":
             print(f"Unhandled exception in run_bot: {e}")
         print("Restarting bot in 10 seconds...")
         time.sleep(10)
-
