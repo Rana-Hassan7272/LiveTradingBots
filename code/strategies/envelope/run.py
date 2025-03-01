@@ -45,9 +45,9 @@ else:  # grid strategy with custom hybrid logic
         'margin_mode': 'isolated',
         'balance_per_symbol': 100,       # default USD per symbol (adjust per symbol if needed)
         'leverage': 2,
-        'entry_trigger_offset': 30,      # Entry trigger offset in USD
-        'fixed_stop_loss': 20,           # Fixed stop loss offset (grid exit) in USD
-        'trailing_stop_distance': 30,    # Trailing stop offset in USD
+        'entry_trigger_offset': 30,      # Entry trigger offset in USD (BTC fixed, others scaled)
+        'fixed_stop_loss': 20,           # Fixed stop loss offset (grid exit) in USD (BTC fixed, others scaled)
+        'trailing_stop_distance': 30,    # Trailing stop offset in USD (BTC fixed, others scaled)
         'trend_filter': True,
         'trend_ema_period': 50,
     }
@@ -72,6 +72,9 @@ print(f"\n{datetime.now().strftime('%H:%M:%S')}: Starting {strategy.capitalize()
 with open(key_path, "r") as f:
     api_setup = json.load(f)[key_name]
 bitget = BitgetFutures(api_setup)
+
+# Global variable for BTC reserved price
+btc_reserved_price = None
 
 # --- Helper Functions ---
 def calculate_indicators(df: pd.DataFrame, strategy='scalping') -> pd.DataFrame:
@@ -235,10 +238,17 @@ class GridTrader:
         print(f"[{self.symbol}] Reserved entry price: {self.reserved_price} with trend {self.trend}")
 
     def check_entry_trigger(self):
-        # Only attempt entry if no position exists.
+        global btc_reserved_price
         ticker = bitget.fetch_ticker(self.symbol)
         current_price = float(ticker['last'])
-        if self.trend == 'bullish' and current_price >= self.reserved_price + params['entry_trigger_offset']:
+        # Calculate dynamic entry trigger offset: for BTC use fixed value, otherwise scale proportionally.
+        if btc_reserved_price and btc_reserved_price > 0 and self.symbol != 'BTC/USDT:USDT':
+            dynamic_entry_offset = self.reserved_price * (params['entry_trigger_offset'] / btc_reserved_price)
+        else:
+            dynamic_entry_offset = params['entry_trigger_offset']
+        print(f"[{self.symbol}] Using entry trigger offset: {dynamic_entry_offset}")
+
+        if self.trend == 'bullish' and current_price >= self.reserved_price + dynamic_entry_offset:
             balance = params['balance_per_symbol'] * params['leverage']
             amount = balance / self.reserved_price
             try:
@@ -251,7 +261,7 @@ class GridTrader:
                 print(f"[{self.symbol}] Entry triggered for LONG at reserved price {self.reserved_price}")
             except Exception as e:
                 print(f"[{self.symbol}] Error placing long entry order: {e}")
-        elif self.trend == 'bearish' and current_price <= self.reserved_price - params['entry_trigger_offset']:
+        elif self.trend == 'bearish' and current_price <= self.reserved_price - dynamic_entry_offset:
             balance = params['balance_per_symbol'] * params['leverage']
             amount = balance / self.reserved_price
             try:
@@ -278,12 +288,16 @@ class GridTrader:
             try:
                 entry_price = float(self.position['entryPrice'])
                 side = self.position['side']
-                fixed_stop = params.get('fixed_stop_loss', 20)
+                # Compute dynamic fixed stop loss offset
+                if btc_reserved_price and btc_reserved_price > 0 and self.symbol != 'BTC/USDT:USDT':
+                    dynamic_fixed_stop = self.reserved_price * (params['fixed_stop_loss'] / btc_reserved_price)
+                else:
+                    dynamic_fixed_stop = params['fixed_stop_loss']
                 if side == 'long':
-                    stop_price = entry_price - fixed_stop
+                    stop_price = entry_price - dynamic_fixed_stop
                     order_side = 'sell'
                 else:
-                    stop_price = entry_price + fixed_stop
+                    stop_price = entry_price + dynamic_fixed_stop
                     order_side = 'buy'
                 amount = self.position.get('contracts', None)
                 if amount is None:
@@ -305,21 +319,26 @@ class GridTrader:
     def update_trailing_stop(self):
         if self.position:
             current_price = float(self.position['markPrice'])
+            # Compute dynamic trailing stop offset
+            if btc_reserved_price and btc_reserved_price > 0 and self.symbol != 'BTC/USDT:USDT':
+                dynamic_trailing_stop = self.reserved_price * (params['trailing_stop_distance'] / btc_reserved_price)
+            else:
+                dynamic_trailing_stop = params['trailing_stop_distance']
             if not self.trailing_stop:
                 if self.position['side'] == 'long':
-                    self.trailing_stop = {'peak_price': current_price, 'stop_price': current_price - params['trailing_stop_distance']}
+                    self.trailing_stop = {'peak_price': current_price, 'stop_price': current_price - dynamic_trailing_stop}
                 else:
-                    self.trailing_stop = {'peak_price': current_price, 'stop_price': current_price + params['trailing_stop_distance']}
+                    self.trailing_stop = {'peak_price': current_price, 'stop_price': current_price + dynamic_trailing_stop}
                 print(f"[{self.symbol}] Initialized trailing stop: {self.trailing_stop}")
             else:
                 if self.position['side'] == 'long':
                     if current_price > self.trailing_stop['peak_price']:
                         self.trailing_stop['peak_price'] = current_price
-                        self.trailing_stop['stop_price'] = current_price - params['trailing_stop_distance']
+                        self.trailing_stop['stop_price'] = current_price - dynamic_trailing_stop
                 else:
                     if current_price < self.trailing_stop['peak_price']:
                         self.trailing_stop['peak_price'] = current_price
-                        self.trailing_stop['stop_price'] = current_price + params['trailing_stop_distance']
+                        self.trailing_stop['stop_price'] = current_price + dynamic_trailing_stop
                 print(f"[{self.symbol}] Updated trailing stop: {self.trailing_stop}")
 
     def check_stop_conditions(self):
@@ -384,6 +403,8 @@ def run_bot():
                 bitget.set_margin_mode(symbol, params['margin_mode'])
                 bitget.set_leverage(symbol, params['margin_mode'], params['leverage'])
                 trader.start_trading()
+                if symbol == 'BTC/USDT:USDT':
+                    btc_reserved_price = trader.reserved_price  # store BTC reserved price globally
             except Exception as e:
                 print(f"[{symbol}] Error initializing: {e}")
         while True:
