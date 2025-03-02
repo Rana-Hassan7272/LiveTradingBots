@@ -24,7 +24,7 @@ params: Dict = {
          "down_trailing_offset": 5.0,         # Loss trailing stop offset (for long positions)
          "up_trailing_offset": 5.0,           # Loss trailing stop offset (for short positions)
          "leverage": 2,
-         "capital": 100.0,
+         "capital": 70.0,
     },
     "overrides": {
          "SOL/USDT:USDT": {
