@@ -27,7 +27,7 @@ params: Dict = {
     },
     "overrides": {
          "SOL/USDT:USDT": {
-             "trigger_threshold": 0.3,        # Adjusted for SOL's price scale
+             "trigger_threshold": 0.1,        # Adjusted for SOL's price scale
              "grid_profit_distance": 0.2,
              "fixed_stop_loss": 0.1,
              "trailing_stop_drop": 0.3,
@@ -164,7 +164,6 @@ class GridScalpingBot:
             ticker = bitget.fetch_ticker(self.symbol)
             current_price = float(ticker['last'])
             # Determine direction based on how the position was entered.
-            # (We assume that a market buy means a long position.)
             direction = "long" if self.position["side"].lower() == "buy" else "short"
             if direction == "long":
                 if current_price > self.trailing_stop["peak"]:
@@ -249,7 +248,17 @@ class GridScalpingBot:
             self.log(f"Error checking for trigger: {e}")
 
     def run_cycle(self):
-        """Run one cycle: if not in position, look for a trigger; if in position, update trailing stop and check exit."""
+        """
+        Run one cycle: log the current market price, then:
+          - If not in position, look for a trigger.
+          - If in position, update trailing stop and check for exit.
+        """
+        try:
+            ticker = bitget.fetch_ticker(self.symbol)
+            current_price = float(ticker['last'])
+            self.log(f"Current market price: {current_price}")
+        except Exception as e:
+            self.log(f"Error fetching current market price: {e}")
         if not self.in_position:
             self.check_for_trigger()
         else:
@@ -281,4 +290,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
