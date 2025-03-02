@@ -6,7 +6,7 @@ import datetime
 from typing import Dict
 
 # Ensure the BitgetFutures module is importable
-sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.append(os.path.join(os.path.dirname(__file__), '..','..'))
 from utilities.bitget_futures import BitgetFutures
 
 # =============================================================================
@@ -28,18 +28,18 @@ params: Dict = {
     },
     "overrides": {
          "SOL/USDT:USDT": {
-             "trigger_threshold": 0.3,        # Adjusted for SOL's price scale
-             "trailing_stop_drop": 0.3,
-             "down_trailing_offset": 0.1,
-             "up_trailing_offset": 0.1,
+             "trigger_threshold": 0.5,        # Adjusted for SOL's price scale
+             "trailing_stop_drop": 0.5,
+             "down_trailing_offset": 0.033,
+             "up_trailing_offset": 0.033,
              "leverage": 2,
              "capital": 50.0,
          },
          "XRP/USDT:USDT": {
-             "trigger_threshold": 0.1,
-             "trailing_stop_drop": 0.1,
-             "down_trailing_offset": 0.05,
-             "up_trailing_offset": 0.05,
+             "trigger_threshold": 0.05,
+             "trailing_stop_drop": 0.05,
+             "down_trailing_offset": 0.009,
+             "up_trailing_offset": 0.009,
              "leverage": 2,
              "capital": 50.0,
          }
