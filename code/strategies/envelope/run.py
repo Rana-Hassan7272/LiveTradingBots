@@ -6,7 +6,7 @@ import datetime
 from typing import Dict
 
 # Ensure the BitgetFutures module is importable
-sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.append(os.path.join(os.path.dirname(__file__), '..','..'))
 from utilities.bitget_futures import BitgetFutures
 
 # =============================================================================
