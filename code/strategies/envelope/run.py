@@ -4,8 +4,9 @@ import time
 import pandas as pd
 import json
 import ta
+from typing import Dict 
 from datetime import datetime
-sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.append(os.path.join(os.path.dirname(__file__), '..','..'))
 from utilities.bitget_futures import BitgetFutures
 
 # =============================================================================
@@ -74,16 +75,22 @@ class GridScalpingBot:
         self.last_profit_order_id = None
 
     def log(self, message: str):
-        print(f"[{self.symbol}] {datetime.datetime.now().strftime('%H:%M:%S')}: {message}")
+       print(f"[{self.symbol}] {datetime.now().strftime('%H:%M:%S')}: {message}")
+
 
     def reserve_price(self):
         """Reserve the current market price (do not trade immediately)."""
         try:
             ticker = bitget.fetch_ticker(self.symbol)
-            self.reserved_price = float(ticker['last'])
+            # Use the average of bid and ask if available for a more accurate current market price.
+            if 'bid' in ticker and ticker['bid'] and 'ask' in ticker and ticker['ask']:
+                self.reserved_price = (float(ticker['bid']) + float(ticker['ask'])) / 2.0
+            else:
+                self.reserved_price = float(ticker['last'])
             self.log(f"Reserved price set to {self.reserved_price}")
         except Exception as e:
             self.log(f"Error reserving price: {e}")
+
 
     def cancel_all_orders(self):
         """Cancel all open orders for this symbol."""
