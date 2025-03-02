@@ -6,14 +6,14 @@ import datetime
 from typing import Dict
 
 # Ensure the BitgetFutures module is importable
-sys.path.append(os.path.join(os.path.dirname(__file__), '..','..'))
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from utilities.bitget_futures import BitgetFutures
 
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
 # Define parameters for grid scalping.
-# For BTC, the trigger threshold, grid profit distance, trailing stop (for locking profit)
+# For BTC, the trigger threshold, trailing stop (for locking profit)
 # and the new trailing stop offsets for loss protection are defined in USD.
 # For other coins these values are overridden to reflect their price scales.
 params: Dict = {
@@ -24,22 +24,22 @@ params: Dict = {
          "down_trailing_offset": 5.0,         # Loss trailing stop offset (for long positions)
          "up_trailing_offset": 5.0,           # Loss trailing stop offset (for short positions)
          "leverage": 2,
-         "capital": 70.0,
+         "capital": 100.0,
     },
     "overrides": {
          "SOL/USDT:USDT": {
-             "trigger_threshold": 0.1,        # Adjusted for SOL's price scale
-             "trailing_stop_drop": 0.1,
-             "down_trailing_offset": 0.033,
-             "up_trailing_offset": 0.033,
+             "trigger_threshold": 0.3,        # Adjusted for SOL's price scale
+             "trailing_stop_drop": 0.3,
+             "down_trailing_offset": 0.1,
+             "up_trailing_offset": 0.1,
              "leverage": 2,
              "capital": 50.0,
          },
          "XRP/USDT:USDT": {
-             "trigger_threshold": 0.05,
-             "trailing_stop_drop": 0.05,
-             "down_trailing_offset": 0.009,
-             "up_trailing_offset": 0.009,
+             "trigger_threshold": 0.1,
+             "trailing_stop_drop": 0.1,
+             "down_trailing_offset": 0.05,
+             "up_trailing_offset": 0.05,
              "leverage": 2,
              "capital": 50.0,
          }
@@ -72,11 +72,12 @@ class GridScalpingBot:
         self.entry_price = None         # Price at which the position was entered
         self.in_position = False        # Whether we currently hold a position
         # Trailing stops:
-        # profit_trailing_stop is used to lock in profit if the market reverses from an upward move (for long)
+        # profit_trailing_stop is used to lock in profit if the market reverses from a favorable move
         # loss_trailing_stop is used to control the exit when the market moves against the position.
         self.profit_trailing_stop = None
         self.loss_trailing_stop = None
-        self.last_order_ids = []        # (No longer used for fixed orders in this version)
+        self.position_direction = None  # Stores 'long' or 'short'
+        self.last_order_ids = []        # (Not used for fixed orders in this version)
 
     def log(self, message: str):
         print(f"[{self.symbol}] {datetime.datetime.now().strftime('%H:%M:%S')}: {message}")
@@ -118,7 +119,7 @@ class GridScalpingBot:
             ticker = bitget.fetch_ticker(self.symbol)
             current_price = float(ticker['last'])
             self.entry_price = current_price
-            # Calculate position size based on capital, leverage and current price
+            # Calculate position size based on capital, leverage, and current price
             position_size = (self.config["capital"] * self.config["leverage"]) / current_price
             position_size = float(bitget.amount_to_precision(self.symbol, position_size))
             # Place market order to enter position
@@ -126,6 +127,7 @@ class GridScalpingBot:
             self.log(f"Entered {direction.upper()} position at {current_price} with size {position_size}")
             self.in_position = True
             self.position = order  # Store order info
+            self.position_direction = direction  # Store the entry direction
 
             # Initialize profit trailing stop:
             if direction == "long":
@@ -149,8 +151,8 @@ class GridScalpingBot:
         try:
             ticker = bitget.fetch_ticker(self.symbol)
             current_price = float(ticker['last'])
-            # Determine direction based on position side
-            direction = "long" if self.position["side"].lower() == "buy" else "short"
+            # Use the stored position direction
+            direction = self.position_direction
             if direction == "long":
                 if current_price > self.profit_trailing_stop["peak"]:
                     self.profit_trailing_stop["peak"] = current_price
@@ -171,12 +173,11 @@ class GridScalpingBot:
         try:
             ticker = bitget.fetch_ticker(self.symbol)
             current_price = float(ticker['last'])
-            direction = "long" if self.position["side"].lower() == "buy" else "short"
+            direction = self.position_direction
             if direction == "long":
                 # Only update if market is below entry (i.e. in loss territory)
                 if current_price < self.entry_price:
                     new_stop = current_price - self.config["down_trailing_offset"]
-                    # For a long, we want the stop to follow downward (i.e., become lower) if the price falls further
                     if new_stop < self.loss_trailing_stop:
                         self.loss_trailing_stop = new_stop
                         self.log(f"Updated loss trailing stop to {self.loss_trailing_stop}")
@@ -203,7 +204,7 @@ class GridScalpingBot:
         try:
             ticker = bitget.fetch_ticker(self.symbol)
             current_price = float(ticker['last'])
-            direction = "long" if self.position["side"].lower() == "buy" else "short"
+            direction = self.position_direction  # Use stored direction
 
             if direction == "long":
                 profit_triggered = current_price <= self.profit_trailing_stop["stop"]
@@ -244,6 +245,7 @@ class GridScalpingBot:
             self.position = None
             self.profit_trailing_stop = None
             self.loss_trailing_stop = None
+            self.position_direction = None
             self.last_order_ids = []
 
     def check_for_trigger(self):
@@ -306,4 +308,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
