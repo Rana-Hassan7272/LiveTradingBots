@@ -36,7 +36,7 @@ params: Dict = {
     },
     "overrides": {
          "SOL/USDT:USDT": {
-             "entry_trigger_offset": 0.4,
+             "entry_trigger_offset": 9999,
              "trailing_drop_amount": 0.3,
              "trailing1_drop_amount": 0.05,
              "min_profit_for_trailing": 0.08,
@@ -45,7 +45,7 @@ params: Dict = {
              "capital": 50.0,
          },
          "XRP/USDT:USDT": {
-             "entry_trigger_offset": 0.1,
+             "entry_trigger_offset": 9999,
              "trailing_drop_amount": 0.075,
              "trailing1_drop_amount": 0.025,
              "min_profit_for_trailing": 0.02,
