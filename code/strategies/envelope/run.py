@@ -28,8 +28,8 @@ params: Dict = {
     },
     "overrides": {
          "SOL/USDT:USDT": {
-             "trigger_threshold": 0.5,        # Adjusted for SOL's price scale
-             "trailing_stop_drop": 0.5,
+             "trigger_threshold": 0.1,        # Adjusted for SOL's price scale
+             "trailing_stop_drop": 0.1,
              "down_trailing_offset": 0.033,
              "up_trailing_offset": 0.033,
              "leverage": 2,
