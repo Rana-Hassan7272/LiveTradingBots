@@ -6,40 +6,42 @@ import datetime
 from typing import Dict
 
 # Ensure the BitgetFutures module is importable
-sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.append(os.path.join(os.path.dirname(__file__), '..','..'))
 from utilities.bitget_futures import BitgetFutures
 
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
-# Define parameters for grid scalping.
-# For BTC, the trigger threshold, trailing stop (for locking profit)
-# and the new trailing stop offsets for loss protection are defined in USD.
-# For other coins these values are overridden to reflect their price scales.
+# Adjusted parameters to tighten stop loss and trailing stops.
+# For BTC:
+#   - trigger_threshold remains 30 USD.
+#   - trailing_stop_drop is reduced to 15 USD (tighter profit trailing stop).
+#   - down_trailing_offset/up_trailing_offset are reduced to 2 USD (tighter loss trailing stop).
+# Similar proportional adjustments are made for SOL and XRP.
 params: Dict = {
     "symbols": ["BTC/USDT:USDT", "SOL/USDT:USDT", "XRP/USDT:USDT"],
     "default": {
          "trigger_threshold": 30.0,         # Price must move 30 USD from reserved price (BTC base)
-         "trailing_stop_drop": 30.0,          # Profit trailing stop drop for locking gains
-         "down_trailing_offset": 5.0,         # Loss trailing stop offset (for long positions)
-         "up_trailing_offset": 5.0,           # Loss trailing stop offset (for short positions)
+         "trailing_stop_drop": 15.0,          # Tighter profit trailing stop drop for locking gains
+         "down_trailing_offset": 2.0,         # Tighter loss trailing stop offset for long positions
+         "up_trailing_offset": 2.0,           # Tighter loss trailing stop offset for short positions
          "leverage": 2,
          "capital": 100.0,
     },
     "overrides": {
          "SOL/USDT:USDT": {
-             "trigger_threshold": 0.3,        # Adjusted for SOL's price scale
-             "trailing_stop_drop": 0.3,
-             "down_trailing_offset": 0.1,
-             "up_trailing_offset": 0.1,
+             "trigger_threshold": 0.5,        # Adjusted for SOL's price scale
+             "trailing_stop_drop": 0.15,        # Tighter profit trailing stop drop
+             "down_trailing_offset": 0.05,      # Tighter loss trailing stop offset
+             "up_trailing_offset": 0.05,
              "leverage": 2,
              "capital": 50.0,
          },
          "XRP/USDT:USDT": {
              "trigger_threshold": 0.1,
-             "trailing_stop_drop": 0.1,
-             "down_trailing_offset": 0.05,
-             "up_trailing_offset": 0.05,
+             "trailing_stop_drop": 0.05,        # Tighter for XRP
+             "down_trailing_offset": 0.025,
+             "up_trailing_offset": 0.025,
              "leverage": 2,
              "capital": 50.0,
          }
@@ -173,7 +175,7 @@ class GridScalpingBot:
         try:
             ticker = bitget.fetch_ticker(self.symbol)
             current_price = float(ticker['last'])
-            direction = self.position_direction
+            direction = self.position_direction  # Use stored direction
             if direction == "long":
                 # Only update if market is below entry (i.e. in loss territory)
                 if current_price < self.entry_price:
