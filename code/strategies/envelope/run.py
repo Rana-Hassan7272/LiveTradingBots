@@ -1,179 +1,94 @@
-#!/usr/bin/env python3
-"""
-Final Bot Code for Grid Scalping with Sell Trigger & EMA Trend Confirmation
-
-Features:
-- Reserves the current market price and triggers entry only when the market moves by a set offset.
-- For long trades:
-    * Entry is triggered when price >= reserved + ENTRY_TRIGGER_OFFSET_USD and EMA trend confirms (short EMA > long EMA).
-    * The trade is executed at the reserved price.
-    * A fixed stop loss is set at (entry - STOP_LOSS_OFFSET_USD).
-    * A dynamic primary trailing stop is activated once profit meets the threshold (using highest price - TRAILING_DROP_AMOUNT_USD).
-    * A fixed additional trailing stop (Trailing1) is set at (entry + ENTRY_TRIGGER_OFFSET_USD - TRAILING1_DROP_AMOUNT_USD).
-    * Exit is triggered when the current price falls to or below any of these levels, and a limit order is placed at the exit price.
-- Similar (reversed) logic applies for short trades.
-- An EMA trend filter is used for entry confirmation.
-- Detailed logging and CSV trade logging are included.
-
-Designed for continuous operation (e.g. on AWS).
-"""
-
 import os
 import sys
 import time
 import json
 import datetime
-import csv
-import threading
-from typing import Dict, Optional, Tuple
+from typing import Dict
 
-# Extend the path so that BitgetFutures is importable (as in your old file)
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
+# Ensure the BitgetFutures module is importable
+sys.path.append(os.path.join(os.path.dirname(__file__), '..','..'))
 from utilities.bitget_futures import BitgetFutures
 
 # =============================================================================
-# CONFIGURATION & GLOBAL CONSTANTS
+# CONFIGURATION
 # =============================================================================
-# Parameters for the bot (example values for BTC, with overrides for SOL and XRP)
+# Define parameters for grid scalping. For BTC, the trigger threshold, grid profit 
+# distance, fixed stop loss, and trailing stop drop are defined in USD.
+# For other coins these values are overridden to reflect their price scales.
 params: Dict = {
     "symbols": ["BTC/USDT:USDT", "SOL/USDT:USDT", "XRP/USDT:USDT"],
     "default": {
-         "entry_trigger_offset": 40.0,       # USD offset to trigger trade entry
-         "trailing_drop_amount": 30.0,         # For primary trailing stop: highest - 30 USD (for long)
-         "trailing1_drop_amount": 5.0,         # Fixed Trailing1 stop: (entry + trigger offset - 5 USD)
-         "min_profit_for_trailing": 8.0,         # Minimum profit to activate primary trailing stop
-         "stop_loss_offset": 2.0,              # Fixed stop loss offset (entry - 2 USD for long)
+         "trigger_threshold": 30.0,         # Price must move 30 USD from reserved price (BTC base)
+         "grid_profit_distance": 20.0,        # Place take profit order 20 USD away from entry
+         "fixed_stop_loss": 5.0,              # Fixed stop loss distance in USD
+         "trailing_stop_drop": 30.0,          # Trailing stop will trigger if price falls 30 USD from peak
          "leverage": 2,
          "capital": 100.0,
-         "ema_short_period": 5,              # Short-term EMA period
-         "ema_long_period": 12,              # Long-term EMA period
     },
     "overrides": {
          "SOL/USDT:USDT": {
-             "entry_trigger_offset": 0.4,
-             "trailing_drop_amount": 0.3,
-             "trailing1_drop_amount": 0.05,
-             "min_profit_for_trailing": 0.08,
-             "stop_loss_offset": 0.02,
+             "trigger_threshold": 0.3,        # Adjusted for SOL's price scale
+             "grid_profit_distance": 0.2,
+             "fixed_stop_loss": 0.1,
+             "trailing_stop_drop": 0.3,
              "leverage": 2,
              "capital": 50.0,
-             "ema_short_period": 5,
-             "ema_long_period": 12,
          },
          "XRP/USDT:USDT": {
-             "entry_trigger_offset": 0.1,
-             "trailing_drop_amount": 0.075,
-             "trailing1_drop_amount": 0.025,
-             "min_profit_for_trailing": 0.02,
-             "stop_loss_offset": 0.01,
+             "trigger_threshold": 0.1,
+             "grid_profit_distance": 0.07,
+             "fixed_stop_loss": 0.05,
+             "trailing_stop_drop": 0.1,
              "leverage": 2,
              "capital": 50.0,
-             "ema_short_period": 5,
-             "ema_long_period": 12,
          }
     }
 }
 
-# API key file and key name – exactly as in your old file.
+# API key file and key name (ensure your secret.json is set up accordingly)
 key_path = "LiveTradingBots/secret.json"
 key_name = "envelope"
+
 with open(key_path, "r") as f:
     api_setup = json.load(f)[key_name]
 
-# Initialize the BitgetFutures instance.
+# Initialize BitgetFutures
 bitget = BitgetFutures(api_setup)
 
 # =============================================================================
-# LOGGING & CSV TRADE LOGGING
+# GRID SCALPING BOT CLASS
 # =============================================================================
-LOG_DIR = "logs"
-if not os.path.exists(LOG_DIR):
-    os.makedirs(LOG_DIR)
-LOG_FILE = os.path.join(LOG_DIR, "bot_log.txt")
-CSV_FILE = os.path.join(LOG_DIR, "trades_log.csv")
-csv_lock = threading.Lock()
-
-def init_csv_log(file_path: str):
-    is_new = not os.path.exists(file_path) or os.stat(file_path).st_size == 0
-    csv_file = open(file_path, mode="a", newline="", encoding="utf-8-sig")
-    csv_writer = csv.writer(csv_file, delimiter=';')
-    if is_new:
-        csv_writer.writerow(["Time", "Date", "Symbol", "Trade Type", "Entry Price", "Exit Price", "Profit"])
-        csv_file.flush()
-    return csv_file, csv_writer
-
-csv_file, csv_writer = init_csv_log(CSV_FILE)
-
-def log_csv(symbol: str, trade_type: str, entry_price: float, exit_price: float, profit: float):
-    now = datetime.datetime.now()
-    with csv_lock:
-        csv_writer.writerow([now.strftime("%H:%M:%S"), now.strftime("%Y-%m-%d"), symbol, trade_type,
-                              f"{entry_price:.2f}", f"{exit_price:.2f}", f"{profit:.2f}"])
-        csv_file.flush()
-
-def log_info(msg: str):
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[INFO] {timestamp} - {msg}")
-    with open(LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(f"[INFO] {timestamp} - {msg}\n")
-
-def log_error(msg: str):
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[ERROR] {timestamp} - {msg}")
-    with open(LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(f"[ERROR] {timestamp} - {msg}\n")
-
-# =============================================================================
-# HELPER FUNCTION: EMA CALCULATION
-# =============================================================================
-def calculate_ema(prices: list, period: int) -> float:
-    if not prices:
-        return 0.0
-    ema = prices[0]
-    alpha = 2 / (period + 1)
-    for price in prices:
-        ema = alpha * price + (1 - alpha) * ema
-    return ema
-
-# =============================================================================
-# GRID SCALPING BOT CLASS WITH SELL TRIGGER & EMA TREND CONFIRMATION
-# =============================================================================
-
 class GridScalpingBot:
     def __init__(self, symbol: str, config: Dict):
         self.symbol = symbol
+        # Use default parameters then override if specific values exist for this symbol
         self.config = config["default"].copy()
         if symbol in config["overrides"]:
             self.config.update(config["overrides"][symbol])
-        # State variables:
-        self.reserved_price: Optional[float] = None  # The reserved entry price.
-        self.in_position: bool = False               # True if a trade is open.
-        self.entry_price: Optional[float] = None       # Price at which trade executed.
-        self.stop_loss: Optional[float] = None         # Fixed stop loss.
-        self.highest_price: Optional[float] = None     # Highest price reached (for long).
-        self.primary_trailing_stop: Optional[float] = None  # Dynamic trailing stop.
-        self.trailing1_stop: Optional[float] = None    # Fixed Trailing1 stop.
-        self.lowest_price: Optional[float] = None      # Lowest price (for short).
-        self.position_direction: Optional[str] = None  # "long" or "short".
-        self.position_size: Optional[float] = None       # Calculated order size.
-        self.last_order_ids = []                       # Not used in this implementation.
+        # State variables
+        self.reserved_price = None      # The base price when starting/reseting the bot
+        self.position = None            # Information about the active position
+        self.entry_price = None         # Price at which the position was entered
+        self.trailing_stop = None       # Dict holding 'peak' and 'stop' prices for trailing stop
+        self.in_position = False        # Whether we currently hold a position
+        self.last_order_ids = []        # Store IDs of orders placed (stop loss, take profit, etc.)
+        self.last_profit_order_id = None
 
-    # --------------------- Logging ---------------------
     def log(self, message: str):
         print(f"[{self.symbol}] {datetime.datetime.now().strftime('%H:%M:%S')}: {message}")
-        log_info(f"{self.symbol} - {message}")
 
-    # --------------------- Reserve Price ---------------------
-    def reserve_price_method(self):
+    def reserve_price(self):
+        """Reserve the current market price (do not trade immediately)."""
         try:
             ticker = bitget.fetch_ticker(self.symbol)
+            # Use the exact "last" price for the reserved price
             self.reserved_price = float(ticker['last'])
             self.log(f"Reserved price set to {self.reserved_price}")
         except Exception as e:
             self.log(f"Error reserving price: {e}")
 
-    # --------------------- Cancel Orders ---------------------
     def cancel_all_orders(self):
+        """Cancel all open orders for this symbol."""
         try:
             orders = bitget.fetch_open_orders(self.symbol)
             for order in orders:
@@ -186,217 +101,184 @@ class GridScalpingBot:
             self.log(f"Error fetching open orders: {e}")
         self.last_order_ids = []
 
-    # --------------------- EMA Trend Confirmation ---------------------
-    def get_ema_trend(self) -> Tuple[Optional[float], Optional[float]]:
-        """
-        Fetch recent OHLCV data (1m timeframe) and calculate short and long EMAs.
-        Returns (short_ema, long_ema).
-        """
-        try:
-            ohlcv = bitget.fetch_recent_ohlcv(self.symbol, "1m", limit=50)
-            close_prices = ohlcv["close"].tolist()
-            if not close_prices:
-                return None, None
-            short_period = self.config.get("ema_short_period", 5)
-            long_period = self.config.get("ema_long_period", 12)
-            short_ema = calculate_ema(close_prices, short_period)
-            long_ema = calculate_ema(close_prices, long_period)
-            self.log(f"EMA calculated: short={short_ema:.2f}, long={long_ema:.2f}")
-            return short_ema, long_ema
-        except Exception as e:
-            self.log(f"Error calculating EMAs: {e}")
-            return None, None
-
-    # --------------------- Enter Position ---------------------
     def enter_position(self, direction: str):
+        """
+        Enter a market position in the specified direction.
+        'long' for upward trigger and 'short' for downward trigger.
+        """
         try:
             order_side = "buy" if direction == "long" else "sell"
-            self.entry_price = self.reserved_price  # Execute at reserved price.
-            position_size = (self.config["capital"] * self.config["leverage"]) / self.entry_price
+            ticker = bitget.fetch_ticker(self.symbol)
+            current_price = float(ticker['last'])
+            self.entry_price = current_price
+            # Calculate position size based on capital, leverage and current price
+            position_size = (self.config["capital"] * self.config["leverage"]) / current_price
             position_size = float(bitget.amount_to_precision(self.symbol, position_size))
-            self.position_size = position_size
+            # Place market order to enter position
             order = bitget.place_market_order(self.symbol, order_side, position_size)
-            self.log(f"Entered {direction.upper()} position at {self.entry_price} with size {position_size}")
+            self.log(f"Entered {direction.upper()} position at {current_price} with size {position_size}")
             self.in_position = True
-            self.position_direction = direction
+            self.position = order  # Store order info; you may later fetch detailed position info if needed
 
+            # Immediately place a fixed stop loss order
+            fixed_sl = self.config["fixed_stop_loss"]
             if direction == "long":
-                self.stop_loss = self.entry_price - self.config["stop_loss_offset"]
-                self.highest_price = self.entry_price
-                self.primary_trailing_stop = None
-                self.trailing1_stop = self.reserved_price + self.config["entry_trigger_offset"] - self.config["trailing1_drop_amount"]
-                self.log(f"Stop loss set at {self.stop_loss}")
-                self.log(f"Trailing1 fixed stop set at {self.trailing1_stop}")
+                stop_price = self.entry_price - fixed_sl
+                sl_side = "sell"
             else:
-                self.stop_loss = self.entry_price + self.config["stop_loss_offset"]
-                self.lowest_price = self.entry_price
-                self.primary_trailing_stop = None
-                self.trailing1_stop = self.reserved_price - self.config["entry_trigger_offset"] + self.config["trailing1_drop_amount"]
-                self.log(f"Stop loss set at {self.stop_loss}")
-                self.log(f"Trailing1 fixed stop set at {self.trailing1_stop}")
+                stop_price = self.entry_price + fixed_sl
+                sl_side = "buy"
+            sl_order = bitget.place_trigger_market_order(
+                self.symbol, sl_side, position_size, trigger_price=stop_price, reduce=True)
+            self.log(f"Placed fixed stop loss order at {stop_price}")
+            self.last_order_ids.append(sl_order['id'])
+
+            # Place a take profit (grid profit) limit order
+            grid_profit = self.config["grid_profit_distance"]
+            if direction == "long":
+                tp_price = self.entry_price + grid_profit
+                tp_side = "sell"
+            else:
+                tp_price = self.entry_price - grid_profit
+                tp_side = "buy"
+            tp_order = bitget.place_limit_order(self.symbol, tp_side, position_size, tp_price, reduce=True)
+            self.log(f"Placed take profit order at {tp_price}")
+            self.last_profit_order_id = tp_order['id']
+            self.last_order_ids.append(tp_order['id'])
+
+            # Initialize the trailing stop mechanism
+            if direction == "long":
+                initial_trailing_stop = self.entry_price - self.config["trailing_stop_drop"]
+            else:
+                initial_trailing_stop = self.entry_price + self.config["trailing_stop_drop"]
+            self.trailing_stop = {"peak": self.entry_price, "stop": initial_trailing_stop}
+            self.log(f"Initialized trailing stop: {self.trailing_stop}")
         except Exception as e:
             self.log(f"Error entering position: {e}")
 
-    # --------------------- Update Primary Trailing Stop ---------------------
-    def update_primary_trailing_stop(self):
+    def update_trailing_stop(self):
+        """Update the trailing stop if price moves favorably."""
+        if not self.in_position or self.trailing_stop is None:
+            return
         try:
             ticker = bitget.fetch_ticker(self.symbol)
             current_price = float(ticker['last'])
-            direction = self.position_direction
+            # Determine direction based on how the position was entered.
+            # (We assume that a market buy means a long position.)
+            direction = "long" if self.position["side"].lower() == "buy" else "short"
             if direction == "long":
-                if current_price > self.highest_price:
-                    self.highest_price = current_price
-                    if self.highest_price >= self.entry_price + self.config["entry_trigger_offset"]:
-                        if (self.highest_price - self.entry_price) >= self.config["min_profit_for_trailing"]:
-                            self.primary_trailing_stop = self.highest_price - self.config["trailing_drop_amount"]
-                            self.log(f"Primary trailing stop updated to {self.primary_trailing_stop} (highest: {self.highest_price})")
+                if current_price > self.trailing_stop["peak"]:
+                    self.trailing_stop["peak"] = current_price
+                    self.trailing_stop["stop"] = current_price - self.config["trailing_stop_drop"]
+                    self.log(f"Updated trailing stop to {self.trailing_stop}")
             else:
-                if current_price < self.lowest_price:
-                    self.lowest_price = current_price
-                    if self.lowest_price <= self.entry_price - self.config["entry_trigger_offset"]:
-                        if (self.entry_price - self.lowest_price) >= self.config["min_profit_for_trailing"]:
-                            self.primary_trailing_stop = self.lowest_price + self.config["trailing_drop_amount"]
-                            self.log(f"Primary trailing stop updated to {self.primary_trailing_stop} (lowest: {self.lowest_price})")
+                if current_price < self.trailing_stop["peak"]:
+                    self.trailing_stop["peak"] = current_price
+                    self.trailing_stop["stop"] = current_price + self.config["trailing_stop_drop"]
+                    self.log(f"Updated trailing stop to {self.trailing_stop}")
         except Exception as e:
-            self.log(f"Error updating primary trailing stop: {e}")
+            self.log(f"Error updating trailing stop: {e}")
 
-    # --------------------- Check Exit Conditions ---------------------
-    def check_exit_conditions(self) -> Optional[str]:
+    def check_exit_conditions(self) -> bool:
+        """
+        Check if exit conditions are met:
+          - Price has retraced to the trailing stop level.
+          - The take profit (grid) order has been filled.
+        """
+        if not self.in_position or self.trailing_stop is None:
+            return False
         try:
             ticker = bitget.fetch_ticker(self.symbol)
             current_price = float(ticker['last'])
-            direction = self.position_direction
-            if direction == "long":
-                if current_price <= self.stop_loss:
-                    self.log(f"Stop loss hit: {current_price} <= {self.stop_loss}")
-                    return "stop_loss"
-                if self.primary_trailing_stop is not None and current_price <= self.primary_trailing_stop:
-                    if self.highest_price >= self.entry_price + self.config["entry_trigger_offset"]:
-                        self.log(f"Primary trailing stop hit: {current_price} <= {self.primary_trailing_stop}")
-                        return "primary_trailing"
-                if current_price <= self.trailing1_stop:
-                    self.log(f"Trailing1 stop hit: {current_price} <= {self.trailing1_stop}")
-                    return "trailing1"
-            else:
-                if current_price >= self.stop_loss:
-                    self.log(f"Stop loss hit: {current_price} >= {self.stop_loss}")
-                    return "stop_loss"
-                if self.primary_trailing_stop is not None and current_price >= self.primary_trailing_stop:
-                    if self.lowest_price <= self.entry_price - self.config["entry_trigger_offset"]:
-                        self.log(f"Primary trailing stop hit: {current_price} >= {self.primary_trailing_stop}")
-                        return "primary_trailing"
-                if current_price >= self.trailing1_stop:
-                    self.log(f"Trailing1 stop hit: {current_price} >= {self.trailing1_stop}")
-                    return "trailing1"
-            return None
+            direction = "long" if self.position["side"].lower() == "buy" else "short"
+            if direction == "long" and current_price <= self.trailing_stop["stop"]:
+                self.log(f"Trailing stop hit: current price {current_price} <= stop {self.trailing_stop['stop']}")
+                return True
+            elif direction == "short" and current_price >= self.trailing_stop["stop"]:
+                self.log(f"Trailing stop hit: current price {current_price} >= stop {self.trailing_stop['stop']}")
+                return True
+
+            # Check if the take profit order is still open.
+            open_orders = bitget.fetch_open_orders(self.symbol)
+            profit_order_exists = any(o['id'] == self.last_profit_order_id for o in open_orders)
+            if not profit_order_exists:
+                self.log("Take profit order filled; exiting position")
+                return True
+            return False
         except Exception as e:
             self.log(f"Error checking exit conditions: {e}")
-            return None
+            return False
 
-    # --------------------- Exit Position ---------------------
-    def exit_position(self, exit_reason: str):
+    def exit_position(self):
+        """Exit the current position by issuing a market order and cancel pending orders."""
         if not self.in_position:
             return
         try:
-            exit_side = "sell" if self.position_direction == "long" else "buy"
-            if self.position_direction == "long":
-                if exit_reason == "primary_trailing":
-                    exit_price = self.highest_price
-                elif exit_reason == "trailing1":
-                    exit_price = self.trailing1_stop
-                else:
-                    exit_price = self.stop_loss
-            else:
-                if exit_reason == "primary_trailing":
-                    exit_price = self.lowest_price
-                elif exit_reason == "trailing1":
-                    exit_price = self.trailing1_stop
-                else:
-                    exit_price = self.stop_loss
-            order = bitget.place_limit_order(self.symbol, exit_side, self.position_size, exit_price, reduce=True)
-            self.log(f"Placed exit limit order at {exit_price} due to {exit_reason} condition")
-            self.log("Exited position via limit order")
-            profit = (exit_price - self.entry_price) if self.position_direction == "long" else (self.entry_price - exit_price)
-            log_csv(self.symbol, self.position_direction, self.entry_price, exit_price, profit)
+            bitget.flash_close_position(self.symbol)
+            self.log("Exited position via market order")
             self.cancel_all_orders()
         except Exception as e:
             self.log(f"Error exiting position: {e}")
         finally:
             self.in_position = False
             self.position = None
-            self.entry_price = None
-            self.stop_loss = None
-            self.primary_trailing_stop = None
-            self.trailing1_stop = None
-            self.highest_price = None
-            self.lowest_price = None
-            self.position_direction = None
-            self.position_size = None
+            self.trailing_stop = None
+            self.last_profit_order_id = None
             self.last_order_ids = []
 
-    # --------------------- Check for Trigger with EMA Confirmation ---------------------
     def check_for_trigger(self):
+        """
+        If not in position, check if the current market price has moved enough
+        (up or down) from the reserved price to trigger an entry.
+        """
         if self.in_position or self.reserved_price is None:
             return
         try:
             ticker = bitget.fetch_ticker(self.symbol)
             current_price = float(ticker['last'])
-            trigger_offset = self.config["entry_trigger_offset"]
-            short_ema, long_ema = self.get_ema_trend()
-            if short_ema is None or long_ema is None:
-                self.log("Insufficient EMA data; trigger check skipped.")
-                return
-            if current_price >= self.reserved_price + trigger_offset:
-                if short_ema > long_ema:
-                    self.log(f"Long trigger reached: {current_price} >= {self.reserved_price}+{trigger_offset} and EMA confirmed (short: {short_ema:.2f} > long: {long_ema:.2f})")
-                    self.cancel_all_orders()
-                    self.enter_position("long")
-                else:
-                    self.log(f"Long trigger reached but EMA condition not met (short: {short_ema:.2f} <= long: {long_ema:.2f}).")
-            elif current_price <= self.reserved_price - trigger_offset:
-                if short_ema < long_ema:
-                    self.log(f"Short trigger reached: {current_price} <= {self.reserved_price}-{trigger_offset} and EMA confirmed (short: {short_ema:.2f} < long: {long_ema:.2f})")
-                    self.cancel_all_orders()
-                    self.enter_position("short")
-                else:
-                    self.log(f"Short trigger reached but EMA condition not met (short: {short_ema:.2f} >= long: {long_ema:.2f}).")
+            trigger = self.config["trigger_threshold"]
+            if current_price >= self.reserved_price + trigger:
+                self.log(f"Trigger reached for LONG: {current_price} >= {self.reserved_price} + {trigger}")
+                self.cancel_all_orders()
+                self.enter_position("long")
+            elif current_price <= self.reserved_price - trigger:
+                self.log(f"Trigger reached for SHORT: {current_price} <= {self.reserved_price} - {trigger}")
+                self.cancel_all_orders()
+                self.enter_position("short")
         except Exception as e:
             self.log(f"Error checking for trigger: {e}")
 
-    # --------------------- Main Cycle ---------------------
     def run_cycle(self):
+        """Run one cycle: if not in position, look for a trigger; if in position, update trailing stop and check exit."""
         if not self.in_position:
             self.check_for_trigger()
         else:
-            self.update_primary_trailing_stop()
-            exit_reason = self.check_exit_conditions()
-            if exit_reason is not None:
-                self.exit_position(exit_reason)
-                self.reserve_price_method()
+            self.update_trailing_stop()
+            if self.check_exit_conditions():
+                self.exit_position()
+                # Reset and reserve a new base price after exit
+                self.reserve_price()
 
 # =============================================================================
 # MAIN LOOP
 # =============================================================================
 def main():
-    bots: Dict[str, GridScalpingBot] = {}
+    # Create a bot instance for each symbol and reserve the starting price.
+    bots = {}
     for symbol in params["symbols"]:
         bot = GridScalpingBot(symbol, params)
-        bot.reserve_price_method()
+        bot.reserve_price()
         bots[symbol] = bot
-        bot.log("Bot initialized and ready.")
+
+    # Run continuously (24/7 mode)
     while True:
         for symbol, bot in bots.items():
             try:
                 bot.run_cycle()
             except Exception as e:
                 bot.log(f"Error in run_cycle: {e}")
-        time.sleep(5)
+        time.sleep(5)  # Adjust the sleep interval as needed
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        log_info("Bot stopped by KeyboardInterrupt.")
-    finally:
-        csv_file.close()
+    main()
 
