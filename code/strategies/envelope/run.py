@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 """
 Final Bot Code for Grid Scalping with Sell Trigger & EMA Trend Confirmation
@@ -15,6 +14,8 @@ On entry, the bot:
   - Sets a fixed Trailing1 stop at (entry + ENTRY_TRIGGER_OFFSET_USD – TRAILING1_DROP_AMOUNT_USD).
   - Monitors the highest (or lowest) price and, once profit exceeds MIN_PROFIT_FOR_TRAILING_USD,
     activates a dynamic primary trailing stop at (highest – TRAILING_DROP_AMOUNT_USD) for longs.
+  - Additionally, if the highest price falls by a configurable amount (e.g. TRAILING_STOP_TRIGGER_USD = 60),
+    the bot will trigger an exit using the highest price.
     
 Exit is triggered if the current price falls to or below:
   - The stop loss,
@@ -37,7 +38,7 @@ import json
 import datetime
 import csv
 import threading
-from typing import Dict, Optional,Tuple
+from typing import Dict, Optional, Tuple
 
 # ---------------------- Helper: EMA Calculation ----------------------
 def calculate_ema(prices: list, period: int) -> float:
@@ -69,7 +70,7 @@ params: Dict = {
          "entry_trigger_offset": 40.0,       # Trade trigger threshold (e.g. 40 USD)
          "trailing_drop_amount": 30.0,         # Primary trailing stop drop amount (e.g. 30 USD)
          "trailing1_drop_amount": 5.0,         # Fixed Trailing1 stop drop amount (e.g. 5 USD)
-         "min_profit_for_trailing": 8.0,         # Minimum profit required to activate trailing stop (e.g. 8 USD)
+         "trailing_stop_trigger": 60.0,        # If highest price falls by this amount (e.g., 60 USD), trigger exit\n         "min_profit_for_trailing": 8.0,         # Minimum profit required to activate trailing stop (e.g. 8 USD)
          "stop_loss_offset": 2.0,              # Fixed stop loss offset (e.g. 2 USD below entry for long)
          "leverage": 2,
          "capital": 80.0,
@@ -87,7 +88,7 @@ params: Dict = {
              "capital": 50.0,
              "ema_short_period": 5,
              "ema_long_period": 12,
-         },
+             "trailing_stop_trigger": 60,  # You can adjust this even if not used much for SOL.\n         },
          "XRP/USDT:USDT": {
              "entry_trigger_offset": 500,
              "trailing_drop_amount": 0.075,
@@ -98,6 +99,7 @@ params: Dict = {
              "capital": 50.0,
              "ema_short_period": 5,
              "ema_long_period": 12,
+             "trailing_stop_trigger": 60,
          }
     }
 }
@@ -282,17 +284,30 @@ class GridScalpingBot:
             if direction == "long":
                 if current_price > self.highest_price:
                     self.highest_price = current_price
-                    if self.highest_price >= self.entry_price + self.config["entry_trigger_offset"]:
-                        if (self.highest_price - self.entry_price) >= self.config["min_profit_for_trailing"]:
-                            self.primary_trailing_stop = self.highest_price - self.config["trailing_drop_amount"]
-                            self.log(f"Primary trailing stop updated to {self.primary_trailing_stop} (highest: {self.highest_price})")
+                    # Activate trailing stop only if high >= entry + trigger offset and profit >= min profit.
+                    if self.highest_price >= self.entry_price + self.config["entry_trigger_offset"] and \
+                       (self.highest_price - self.entry_price) >= self.config["min_profit_for_trailing"]:
+                        # Here, instead of using a fixed trailing_drop_amount, we now have a new condition:
+                        # If the drop from the highest price is greater than or equal to trailing_stop_trigger, trigger exit.
+                        dynamic_trailing_stop = self.highest_price - self.config["trailing_drop_amount"]
+                        self.primary_trailing_stop = dynamic_trailing_stop
+                        self.log(f"Primary trailing stop updated to {self.primary_trailing_stop} (highest: {self.highest_price})")
+                # New condition: if the drop from the highest price reaches the configured threshold, exit.
+                trailing_trigger = self.config.get("trailing_stop_trigger", 60.0)
+                if self.highest_price is not None and (self.highest_price - current_price) >= trailing_trigger:
+                    self.log(f"Primary trailing trigger hit: {self.highest_price} - {current_price} >= {trailing_trigger}")
+                    self.primary_trailing_stop = self.highest_price  # Force exit using highest price.
             else:
                 if current_price < self.lowest_price:
                     self.lowest_price = current_price
-                    if self.lowest_price <= self.entry_price - self.config["entry_trigger_offset"]:
-                        if (self.entry_price - self.lowest_price) >= self.config["min_profit_for_trailing"]:
-                            self.primary_trailing_stop = self.lowest_price + self.config["trailing_drop_amount"]
-                            self.log(f"Primary trailing stop updated to {self.primary_trailing_stop} (lowest: {self.lowest_price})")
+                    if self.lowest_price <= self.entry_price - self.config["entry_trigger_offset"] and \
+                       (self.entry_price - self.lowest_price) >= self.config["min_profit_for_trailing"]:
+                        self.primary_trailing_stop = self.lowest_price + self.config["trailing_drop_amount"]
+                        self.log(f"Primary trailing stop updated to {self.primary_trailing_stop} (lowest: {self.lowest_price})")
+                trailing_trigger = self.config.get("trailing_stop_trigger", 60.0)
+                if self.lowest_price is not None and (current_price - self.lowest_price) >= trailing_trigger:
+                    self.log(f"Primary trailing trigger hit: {current_price} - {self.lowest_price} >= {trailing_trigger}")
+                    self.primary_trailing_stop = self.lowest_price
         except Exception as e:
             self.log(f"Error updating primary trailing stop: {e}")
 
@@ -469,3 +484,4 @@ if __name__ == "__main__":
         log_info("Bot per KeyboardInterrupt gestoppt.")
     finally:
         csv_file.close()
+
