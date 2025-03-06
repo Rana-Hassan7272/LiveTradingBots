@@ -71,7 +71,7 @@ params: Dict = {
          "min_profit_for_trailing": 8.0,         # Minimum profit required to activate trailing stop (e.g. 8 USD)
          "stop_loss_offset": 2.0,              # Fixed stop loss offset (e.g. 2 USD below entry for long)
          "leverage": 2,
-         "capital": 100.0,
+         "capital": 80.0,
          "ema_short_period": 5,              # Short-term EMA period for trend confirmation.
          "ema_long_period": 12,              # Long-term EMA period.
     },
