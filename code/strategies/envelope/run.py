@@ -9,21 +9,21 @@ This bot reserves the current market price and triggers an entry only if:
 On entry, the bot:
   - Executes the trade at the reserved price.
   - Sets a fixed stop loss at (entry - STOP_LOSS_OFFSET_USD) for longs.
-  - Sets a fixed Trailing1 stop at (entry + ENTRY_TRIGGER_OFFSET_USD) for longs
-    (and for shorts, (entry - ENTRY_TRIGGER_OFFSET_USD)), ensuring that profit equals the trigger offset.
+  - Sets a fixed Trailing1 stop at (entry + ENTRY_TRIGGER_OFFSET_USD) for longs 
+    (and for shorts, (entry - ENTRY_TRIGGER_OFFSET_USD)), so that the profit locked equals the trigger offset.
   - Monitors the highest (or lowest) price and, once profit exceeds MIN_PROFIT_FOR_TRAILING_USD,
     activates a dynamic primary trailing stop at (highest – TRAILING_DROP_AMOUNT_USD) for longs.
   - Additionally, if the highest price falls by a configurable amount (TRAILING_STOP_TRIGGER_USD),
-    the bot will trigger an exit using the highest price.
+    the bot triggers an exit using the highest price.
     
 Exit is triggered if the current price falls to or below:
   - The stop loss,
-  - The dynamic primary trailing stop (if active and if the highest price remains in the profit zone), or
+  - The dynamic primary trailing stop (if active), or
   - The fixed Trailing1 stop.
 
 A limit order is used for exit to reduce slippage.
 
-This code is designed for continuous operation (e.g. on an AWS server).
+This code is designed for continuous operation.
 """
 
 import os
@@ -36,11 +36,8 @@ import threading
 from typing import Dict, Optional, Tuple
 
 # ---------------------- Helper: EMA Calculation ----------------------
+# (EMA functions remain here if needed later; currently unused.)
 def calculate_ema(prices: list, period: int) -> float:
-    """
-    Calculate the Exponential Moving Average (EMA) for a list of prices.
-    (Not used now as EMA is removed.)
-    """
     if not prices or len(prices) == 0:
         return 0.0
     ema = prices[0]
@@ -60,40 +57,33 @@ from utilities.bitget_futures import BitgetFutures
 params: Dict = {
     "symbols": ["BTC/USDT:USDT", "SOL/USDT:USDT", "XRP/USDT:USDT"],
     "default": {
-         "entry_trigger_offset": 40.0,       # Trigger threshold in USD
-         "trailing_drop_amount": 30.0,         # Dynamic trailing stop drop amount in USD
-         "trailing1_drop_amount": 5.0,         # (Not used now, fixed stop set at reserved+trigger)
-         "trailing_stop_trigger": 60.0,        # If the highest price falls by this amount, trigger exit
-         "min_profit_for_trailing": 8.0,         # Minimum profit to activate trailing stop
-         "stop_loss_offset": 2.0,              # Stop loss offset (e.g., 2 USD below entry for long)
+         "entry_trigger_offset": 40.0,        # Trigger threshold in USD
+         "trailing_drop_amount": 30.0,          # Dynamic trailing stop drop amount
+         "trailing_stop_trigger": 60.0,         # If the highest price falls by this amount, trigger exit
+         "min_profit_for_trailing": 8.0,          # Minimum profit to activate trailing stop
+         "stop_loss_offset": 2.0,               # Stop loss offset (e.g., 2 USD below entry for long)
          "leverage": 2,
-         "capital": 100.0,                   # Capital is now 100 USD
-         "ema_short_period": 5,              # EMA parameters exist but are no longer used for trigger
+         "capital": 100.0,                    # Capital is 100 USD now
+         "ema_short_period": 5,               # (EMA not used in trigger now)
          "ema_long_period": 12,
     },
     "overrides": {
          "SOL/USDT:USDT": {
              "entry_trigger_offset": 400,
              "trailing_drop_amount": 0.3,
-             "trailing1_drop_amount": 0.05,
              "min_profit_for_trailing": 0.08,
              "stop_loss_offset": 0.02,
              "leverage": 2,
              "capital": 50.0,
-             "ema_short_period": 5,
-             "ema_long_period": 12,
              "trailing_stop_trigger": 60,
          },
          "XRP/USDT:USDT": {
              "entry_trigger_offset": 500,
              "trailing_drop_amount": 0.075,
-             "trailing1_drop_amount": 0.025,
              "min_profit_for_trailing": 0.02,
              "stop_loss_offset": 0.01,
              "leverage": 2,
              "capital": 50.0,
-             "ema_short_period": 5,
-             "ema_long_period": 12,
              "trailing_stop_trigger": 60,
          }
     }
@@ -147,7 +137,7 @@ def log_error(msg: str):
         f.write(f"[ERROR] {timestamp} - {msg}\n")
 
 # =============================================================================
-# GRID SCALPING BOT CLASS WITHOUT EMA TRIGGER (Immediate Entry)
+# GRID SCALPING BOT CLASS WITHOUT EMA TRIGGER (Immediate Entry Based on Price)
 # =============================================================================
 
 class GridScalpingBot:
@@ -156,17 +146,18 @@ class GridScalpingBot:
         self.config = config["default"].copy()
         if symbol in config["overrides"]:
             self.config.update(config["overrides"][symbol])
-        self.reserved_price: Optional[float] = None   # Reserved entry price.
-        self.in_position: bool = False                # Whether a trade is open.
-        self.entry_price: Optional[float] = None        # Execution price at entry.
-        self.stop_loss: Optional[float] = None          # Fixed stop loss level.
-        self.highest_price: Optional[float] = None      # Highest price reached (for long).
-        self.primary_trailing_stop: Optional[float] = None  # Dynamic trailing stop.
-        self.trailing1_stop: Optional[float] = None     # Fixed Trailing1 stop.
-        self.lowest_price: Optional[float] = None       # Lowest price (for short).
-        self.position_direction: Optional[str] = None   # "long" or "short".
-        self.position_size: Optional[float] = None        # Calculated order size.
-        self.last_order_ids = []                         # Not used here.
+        # State variables.
+        self.reserved_price: Optional[float] = None
+        self.in_position: bool = False
+        self.entry_price: Optional[float] = None
+        self.stop_loss: Optional[float] = None
+        self.highest_price: Optional[float] = None
+        self.primary_trailing_stop: Optional[float] = None
+        self.trailing1_stop: Optional[float] = None
+        self.lowest_price: Optional[float] = None
+        self.position_direction: Optional[str] = None
+        self.position_size: Optional[float] = None
+        self.last_order_ids = []
 
     # --------------------- Logging ---------------------
     def log(self, message: str):
@@ -207,14 +198,19 @@ class GridScalpingBot:
 
     # --------------------- Position Entry ---------------------
     def enter_position(self, direction: str):
+        # Do not attempt to enter if already in a position.
+        if self.in_position:
+            self.log("Already in a position, skipping entry.")
+            return
+
         available = self.get_available_balance()
         if available < self.config["capital"]:
-            self.log(f"Insufficient balance: Available {available} < Required {self.config['capital']}. Trade not entered.")
+            self.log(f"Insufficient balance: Available {available} < Required {self.config['capital']}. Waiting for current position to close.")
             return
 
         try:
             order_side = "buy" if direction == "long" else "sell"
-            self.entry_price = self.reserved_price  # Always execute at reserved price.
+            self.entry_price = self.reserved_price  # Execute at reserved price.
             position_size = (self.config["capital"] * self.config["leverage"]) / self.entry_price
             position_size = float(bitget.amount_to_precision(self.symbol, position_size))
             self.position_size = position_size
@@ -227,7 +223,7 @@ class GridScalpingBot:
                 self.stop_loss = self.entry_price - self.config["stop_loss_offset"]
                 self.highest_price = self.entry_price
                 self.primary_trailing_stop = None
-                # Fixed Trailing1 stop set exactly at reserved + trigger offset.
+                # Fixed Trailing1 stop set to reserved + trigger offset (locking in 40 USD profit)
                 self.trailing1_stop = self.reserved_price + self.config["entry_trigger_offset"]
                 self.log(f"Stop loss set at {self.stop_loss}")
                 self.log(f"Trailing1 fixed stop set at {self.trailing1_stop}")
@@ -352,23 +348,18 @@ class GridScalpingBot:
 
     # --------------------- Trigger Check ---------------------
     def check_for_trigger(self):
-        """
-        If no trade is open, check if the market price has moved enough from the reserved price
-        to trigger an entry.
-          For long: trigger if current price >= (reserved + ENTRY_TRIGGER_OFFSET).
-          For short: trigger if current price <= (reserved - ENTRY_TRIGGER_OFFSET).
-        (EMA functionality has been removed.)
-        """
         if self.in_position or self.reserved_price is None:
             return
         try:
             ticker = bitget.fetch_ticker(self.symbol)
             current_price = float(ticker['last'])
             trigger_offset = self.config["entry_trigger_offset"]
+            # For long trade trigger: if current price >= reserved + trigger offset, enter long.
             if current_price >= self.reserved_price + trigger_offset:
                 self.log(f"Long trigger reached: {current_price} >= {self.reserved_price} + {trigger_offset}")
                 self.cancel_all_orders()
                 self.enter_position("long")
+            # For short trade trigger: if current price <= reserved - trigger offset, enter short.
             elif current_price <= self.reserved_price - trigger_offset:
                 self.log(f"Short trigger reached: {current_price} <= {self.reserved_price} - {trigger_offset}")
                 self.cancel_all_orders()
@@ -404,7 +395,7 @@ def main():
                 bot.run_cycle()
             except Exception as e:
                 bot.log(f"Error in run_cycle: {e}")
-        time.sleep(5)
+        time.sleep(1)  # Reduced sleep interval for more responsive exit checks
 
 if __name__ == "__main__":
     try:
@@ -413,5 +404,3 @@ if __name__ == "__main__":
         log_info("Bot per KeyboardInterrupt gestoppt.")
     finally:
         csv_file.close()
-
-
