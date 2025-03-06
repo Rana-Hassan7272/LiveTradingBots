@@ -14,7 +14,7 @@ On entry, the bot:
   - Sets a fixed Trailing1 stop at (entry + ENTRY_TRIGGER_OFFSET_USD – TRAILING1_DROP_AMOUNT_USD).
   - Monitors the highest (or lowest) price and, once profit exceeds MIN_PROFIT_FOR_TRAILING_USD,
     activates a dynamic primary trailing stop at (highest – TRAILING_DROP_AMOUNT_USD) for longs.
-  - Additionally, if the highest price falls by a configurable amount (e.g. TRAILING_STOP_TRIGGER_USD = 60),
+  - Additionally, if the highest price falls by a configurable amount (trailing_stop_trigger),
     the bot will trigger an exit using the highest price.
     
 Exit is triggered if the current price falls to or below:
@@ -70,7 +70,8 @@ params: Dict = {
          "entry_trigger_offset": 40.0,       # Trade trigger threshold (e.g. 40 USD)
          "trailing_drop_amount": 30.0,         # Primary trailing stop drop amount (e.g. 30 USD)
          "trailing1_drop_amount": 5.0,         # Fixed Trailing1 stop drop amount (e.g. 5 USD)
-         "trailing_stop_trigger": 60.0,        # If highest price falls by this amount (e.g., 60 USD), trigger exit\n         "min_profit_for_trailing": 8.0,         # Minimum profit required to activate trailing stop (e.g. 8 USD)
+         "trailing_stop_trigger": 60.0,        # If highest price falls by this amount, trigger exit
+         "min_profit_for_trailing": 8.0,         # Minimum profit required to activate trailing stop (e.g. 8 USD)
          "stop_loss_offset": 2.0,              # Fixed stop loss offset (e.g. 2 USD below entry for long)
          "leverage": 2,
          "capital": 80.0,
@@ -88,7 +89,8 @@ params: Dict = {
              "capital": 50.0,
              "ema_short_period": 5,
              "ema_long_period": 12,
-             "trailing_stop_trigger": 60,  # You can adjust this even if not used much for SOL.\n         },
+             "trailing_stop_trigger": 60,
+         },
          "XRP/USDT:USDT": {
              "entry_trigger_offset": 500,
              "trailing_drop_amount": 0.075,
@@ -154,7 +156,7 @@ def log_error(msg: str):
         f.write(f"[ERROR] {timestamp} - {msg}\n")
 
 # =============================================================================
-# GRID SCALPING BOT CLASS WITH SELL TRIGGER & EMA TREND CONFIRMATION
+# GRID SCALPING BOT CLASS WITH SELL TRIGGER, EMA TREND CONFIRMATION & BALANCE CHECK
 # =============================================================================
 
 class GridScalpingBot:
@@ -180,6 +182,16 @@ class GridScalpingBot:
     def log(self, message: str):
         print(f"[{self.symbol}] {datetime.datetime.now().strftime('%H:%M:%S')}: {message}")
         log_info(f"{self.symbol} - {message}")
+
+    # --------------------- Balance Check ---------------------
+    def get_available_balance(self) -> float:
+        try:
+            bal = bitget.fetch_balance()
+            # Adjust key names as per your exchange response; here we assume USDT balance under 'USDT'
+            return float(bal['USDT']['free'])
+        except Exception as e:
+            self.log(f"Error fetching balance: {e}")
+            return 0.0
 
     # --------------------- Reserve Price ---------------------
     def reserve_price_method(self):
@@ -213,7 +225,6 @@ class GridScalpingBot:
         Returns (short_ema, long_ema). If data is insufficient, returns (None, None).
         """
         try:
-            # Use 1m timeframe; adjust limit as needed.
             ohlcv = bitget.fetch_recent_ohlcv(self.symbol, "1m", limit=50)
             close_prices = ohlcv["close"].tolist()
             if not close_prices:
@@ -238,7 +249,13 @@ class GridScalpingBot:
           - Set fixed Trailing1 stop at (reserved + ENTRY_TRIGGER_OFFSET - TRAILING1_DROP_AMOUNT).
           - Initialize highest_price = entry_price.
         For short trades, analogous logic applies.
+        Also check if available balance is sufficient.
         """
+        available = self.get_available_balance()
+        if available < self.config["capital"]:
+            self.log(f"Insufficient balance: Available {available} < Required {self.config['capital']}. Trade not entered.")
+            return
+
         try:
             order_side = "buy" if direction == "long" else "sell"
             self.entry_price = self.reserved_price  # Execute at reserved price.
@@ -275,6 +292,8 @@ class GridScalpingBot:
           - Update highest_price if current price exceeds it.
           - Once highest_price >= (entry + ENTRY_TRIGGER_OFFSET) and profit >= MIN_PROFIT_FOR_TRAILING,
             set primary trailing stop = highest_price - TRAILING_DROP_AMOUNT.
+          - Additionally, if the drop from the highest price reaches trailing_stop_trigger,
+            set the primary trailing stop to force an exit using the highest price.
         For short trades, apply reversed logic.
         """
         try:
@@ -284,15 +303,11 @@ class GridScalpingBot:
             if direction == "long":
                 if current_price > self.highest_price:
                     self.highest_price = current_price
-                    # Activate trailing stop only if high >= entry + trigger offset and profit >= min profit.
                     if self.highest_price >= self.entry_price + self.config["entry_trigger_offset"] and \
                        (self.highest_price - self.entry_price) >= self.config["min_profit_for_trailing"]:
-                        # Here, instead of using a fixed trailing_drop_amount, we now have a new condition:
-                        # If the drop from the highest price is greater than or equal to trailing_stop_trigger, trigger exit.
-                        dynamic_trailing_stop = self.highest_price - self.config["trailing_drop_amount"]
-                        self.primary_trailing_stop = dynamic_trailing_stop
+                        self.primary_trailing_stop = self.highest_price - self.config["trailing_drop_amount"]
                         self.log(f"Primary trailing stop updated to {self.primary_trailing_stop} (highest: {self.highest_price})")
-                # New condition: if the drop from the highest price reaches the configured threshold, exit.
+                # New condition: if the drop from the highest price reaches the configured trigger, force exit.
                 trailing_trigger = self.config.get("trailing_stop_trigger", 60.0)
                 if self.highest_price is not None and (self.highest_price - current_price) >= trailing_trigger:
                     self.log(f"Primary trailing trigger hit: {self.highest_price} - {current_price} >= {trailing_trigger}")
