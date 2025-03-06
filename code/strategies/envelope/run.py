@@ -22,7 +22,7 @@ Exit is triggered if the current price falls to or below:
   - The fixed Trailing1 stop.
 
 A limit order is used for exit to reduce slippage. If the limit order is not filled within a short interval,
-the bot force-closes the position via a market order (flash_close_position).
+the bot forces an exit using a market order (via flash_close_position) while passing the correct "holdSide" parameter.
 
 This code is designed for continuous operation.
 """
@@ -38,10 +38,7 @@ from typing import Dict, Optional, Tuple
 
 # ---------------------- Helper: EMA Calculation ----------------------
 def calculate_ema(prices: list, period: int) -> float:
-    """
-    Calculate the Exponential Moving Average (EMA) for a list of prices.
-    (Not used now since EMA trigger is removed.)
-    """
+    # (Not used in this version since EMA triggering is removed.)
     if not prices or len(prices) == 0:
         return 0.0
     ema = prices[0]
@@ -68,7 +65,7 @@ params: Dict = {
          "stop_loss_offset": 2.0,              # Stop loss offset (e.g., 2 USD below entry for long)
          "leverage": 2,
          "capital": 100.0,                   # Capital is 100 USD
-         "ema_short_period": 5,              # (EMA not used now)
+         "ema_short_period": 5,              # (EMA parameters exist but are not used here)
          "ema_long_period": 12,
     },
     "overrides": {
@@ -141,7 +138,7 @@ def log_error(msg: str):
         f.write(f"[ERROR] {timestamp} - {msg}\n")
 
 # =============================================================================
-# GRID SCALPING BOT CLASS WITHOUT EMA TRIGGER (Immediate Entry)
+# GRID SCALPING BOT CLASS (Without EMA Trigger; Immediate Entry Based on Price)
 # =============================================================================
 
 class GridScalpingBot:
@@ -160,7 +157,7 @@ class GridScalpingBot:
         self.lowest_price: Optional[float] = None       # Lowest price (for short).
         self.position_direction: Optional[str] = None   # "long" or "short".
         self.position_size: Optional[float] = None        # Calculated order size.
-        self.last_order_ids = []                         # Not used in this implementation.
+        self.last_order_ids = []
 
     # --------------------- Logging ---------------------
     def log(self, message: str):
@@ -204,10 +201,12 @@ class GridScalpingBot:
         if self.in_position:
             self.log("Already in a position, skipping entry.")
             return
+
         available = self.get_available_balance()
         if available < self.config["capital"]:
             self.log(f"Insufficient balance: Available {available} < Required {self.config['capital']}. Waiting for current position to close.")
             return
+
         try:
             order_side = "buy" if direction == "long" else "sell"
             self.entry_price = self.reserved_price  # Always execute at reserved price.
@@ -220,14 +219,15 @@ class GridScalpingBot:
             self.position_direction = direction
 
             if direction == "long":
-                self.stop_loss = self.entry_price - self.config["stop_loss_offset"]  # e.g., 89127.7 - 2 = 89125.7
+                # For a long trade: stop loss is reserved - 2; fixed Trailing1 stop is reserved + 40.
+                self.stop_loss = self.entry_price - self.config["stop_loss_offset"]
                 self.highest_price = self.entry_price
                 self.primary_trailing_stop = None
-                # Fixed Trailing1 stop set exactly at reserved + trigger offset (e.g., 89127.7 + 40 = 89167.7)
                 self.trailing1_stop = self.reserved_price + self.config["entry_trigger_offset"]
                 self.log(f"Stop loss set at {self.stop_loss}")
                 self.log(f"Trailing1 fixed stop set at {self.trailing1_stop}")
             else:
+                # For a short trade: stop loss is reserved + 2; fixed Trailing1 stop is reserved - 40.
                 self.stop_loss = self.entry_price + self.config["stop_loss_offset"]
                 self.lowest_price = self.entry_price
                 self.primary_trailing_stop = None
@@ -326,17 +326,15 @@ class GridScalpingBot:
                 else:
                     exit_price = self.stop_loss
 
-            # Place a limit order to exit.
             order = bitget.place_limit_order(self.symbol, exit_side, self.position_size, exit_price, reduce=True)
             self.log(f"Placed exit limit order at {exit_price} due to {exit_reason} condition")
-            # Wait a short period for the limit order to fill.
+            # Wait 3 seconds for the limit order to fill.
             time.sleep(3)
-            # Check if the position is closed.
             positions = bitget.fetch_open_positions(self.symbol)
             if positions and len(positions) > 0:
                 self.log("Limit order not filled; forcing exit via market order.")
-                # Force close the position.
-                bitget.flash_close_position(self.symbol, side=exit_side)
+                # Force exit using flash_close_position with correct holdSide parameter.
+                bitget.flash_close_position(self.symbol, holdSide=self.position_direction)
                 self.log("Forced exit via flash_close_position.")
             profit = (exit_price - self.entry_price) if self.position_direction == "long" else (self.entry_price - exit_price)
             log_csv(self.symbol, self.position_direction, self.entry_price, exit_price, profit)
