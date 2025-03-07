@@ -37,7 +37,7 @@ params: Dict = {
          "capital": 50.0,                    # Capital in USD (updated to 50)
          "ema_short_period": 5,
          "ema_long_period": 12,
-         "global_stop_roi": -0.1             # Global stop loss: exit if ROI (in %) falls to or below -0.1%
+         "global_stop_roi": -0.01             # Global stop loss: exit if ROI (in %) falls to or below -0.1%
     },
     "overrides": {
          "SOL/USDT:USDT": {
@@ -109,7 +109,7 @@ def log_error(msg: str):
         f.write(f"[ERROR] {timestamp} - {msg}\n")
 
 # =============================================================================
-# GRID SCALPING BOT CLASS (Immediate Market Exit with Fallback)
+# GRID SCALPING BOT CLASS (Hybrid Exit Approach)
 # =============================================================================
 
 class GridScalpingBot:
@@ -275,24 +275,53 @@ class GridScalpingBot:
             self.log(f"Error checking exit conditions: {e}")
             return None
 
-    # --------------------- Position Exit (Immediate Market Exit with Fallback) ---------------------
+    # --------------------- Position Exit (Hybrid Approach) ---------------------
     def exit_position(self, exit_reason: str):
         if not self.in_position:
             return
         exit_side = "sell" if self.position_direction == "long" else "buy"
+        # Determine the exit price based on exit_reason and position direction.
+        if self.position_direction == "long":
+            if exit_reason == "primary_trailing":
+                exit_price = self.highest_price
+            elif exit_reason == "trailing1":
+                exit_price = self.trailing1_stop
+            else:
+                exit_price = self.stop_loss
+        else:
+            if self.position_direction == "short":
+                if exit_reason == "primary_trailing":
+                    exit_price = self.lowest_price
+                elif exit_reason == "trailing1":
+                    exit_price = self.trailing1_stop
+                else:
+                    exit_price = self.stop_loss
+            else:
+                exit_price = self.stop_loss
+
         try:
-            self.log(f"Exiting position due to {exit_reason} condition, executing market order exit.")
-            order = bitget.place_market_order(self.symbol, exit_side, self.position_size, reduce=True)
-            self.log(f"Market exit order placed: {order}")
+            # First, try placing a limit order at the chosen exit price.
+            order = bitget.place_limit_order(self.symbol, exit_side, self.position_size, exit_price, reduce=True)
+            self.log(f"Limit exit order placed at {exit_price} due to {exit_reason} condition")
+            # Wait for a short time to allow order fill.
+            time.sleep(3)
+            # Check if the position is closed.
+            positions = bitget.fetch_open_positions(self.symbol)
+            total_contracts = sum(float(pos.get('contracts', 0)) for pos in positions) if positions else 0
+            if total_contracts > 0:
+                self.log("Limit order not filled; canceling pending orders and falling back to market exit")
+                self.cancel_all_orders()
+                fallback_order = bitget.place_market_order(self.symbol, exit_side, self.position_size, reduce=True)
+                self.log(f"Fallback market exit order placed: {fallback_order}")
+            else:
+                self.log("Limit order filled successfully; position closed")
         except Exception as e:
-            self.log(f"Error during exit_position with {exit_reason}: {e}")
-            if exit_reason == "stop_loss":
-                self.log("Attempting fallback global stop exit as backup for stop_loss failure.")
-                try:
-                    order = bitget.place_market_order(self.symbol, exit_side, self.position_size, reduce=True)
-                    self.log(f"Fallback global stop exit order placed: {order}")
-                except Exception as e2:
-                    self.log(f"Global stop fallback also failed: {e2}")
+            self.log(f"Error during limit exit order: {e}. Falling back to market exit")
+            try:
+                fallback_order = bitget.place_market_order(self.symbol, exit_side, self.position_size, reduce=True)
+                self.log(f"Fallback market exit order placed: {fallback_order}")
+            except Exception as e2:
+                self.log(f"Market exit fallback also failed: {e2}")
         finally:
             try:
                 current_price = float(bitget.fetch_ticker(self.symbol)['last'])
@@ -301,6 +330,7 @@ class GridScalpingBot:
             except Exception as e:
                 self.log(f"Error during profit logging: {e}")
             self.cancel_all_orders()
+            # Reset state for reentry.
             self.in_position = False
             self.entry_price = None
             self.stop_loss = None
