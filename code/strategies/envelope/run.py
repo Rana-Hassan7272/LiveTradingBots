@@ -25,38 +25,40 @@ from utilities.bitget_futures import BitgetFutures
 # =============================================================================
 # CONFIGURATION & GLOBAL CONSTANTS
 # =============================================================================
+# Default BTC settings are in USD.
+# Overrides for SOL and XRP are scaled relative to BTC.
 params: Dict = {
     "symbols": ["BTC/USDT:USDT", "SOL/USDT:USDT", "XRP/USDT:USDT"],
     "default": {
-         "entry_trigger_offset": 40.0,       # Trigger threshold in USD
-         "trailing_drop_amount": 30.0,         # Dynamic trailing stop drop amount in USD
-         "trailing_stop_trigger": 60.0,        # If highest/lowest price falls/rises by this amount, trigger exit
-         "min_profit_for_trailing": 8.0,         # Minimum profit to activate trailing stop
-         "stop_loss_offset": 2.0,              # Fixed stop loss offset in USD
+         "entry_trigger_offset": 40.0,       # BTC trigger threshold in USD
+         "trailing_drop_amount": 30.0,         # BTC trailing drop amount in USD
+         "trailing_stop_trigger": 60.0,        # BTC trailing stop trigger in USD
+         "min_profit_for_trailing": 8.0,         # BTC minimum profit for trailing stop in USD
+         "stop_loss_offset": 2.0,              # BTC fixed stop loss offset in USD
          "leverage": 2,
-         "capital": 50.0,                    # Capital in USD (updated to 50)
+         "capital": 50.0,                    # Capital in USD for all coins
          "ema_short_period": 5,
          "ema_long_period": 12,
-         "global_stop_roi": -0.01             # Global stop loss: exit if ROI (in %) falls to or below -0.1%
+         "global_stop_roi": -0.1             # Global stop loss threshold (%)
     },
     "overrides": {
          "SOL/USDT:USDT": {
-             "entry_trigger_offset": 400,
-             "trailing_drop_amount": 0.3,
-             "min_profit_for_trailing": 0.08,
-             "stop_loss_offset": 0.02,
+             "entry_trigger_offset": 0.07,       # ~40 * (144.18/85000)
+             "trailing_drop_amount": 0.05,         # ~30 * (144.18/85000)
+             "min_profit_for_trailing": 0.014,       # ~8 * (144.18/85000)
+             "stop_loss_offset": 0.0034,           # ~2 * (144.18/85000)
+             "trailing_stop_trigger": 0.10,        # ~60 * (144.18/85000)
              "leverage": 2,
-             "capital": 50.0,
-             "trailing_stop_trigger": 60,
+             "capital": 50.0
          },
          "XRP/USDT:USDT": {
-             "entry_trigger_offset": 500,
-             "trailing_drop_amount": 0.075,
-             "min_profit_for_trailing": 0.02,
-             "stop_loss_offset": 0.01,
+             "entry_trigger_offset": 0.0012,      # ~40 * (2.50/85000)
+             "trailing_drop_amount": 0.0009,        # ~30 * (2.50/85000)
+             "min_profit_for_trailing": 0.00024,    # ~8 * (2.50/85000)
+             "stop_loss_offset": 0.00006,           # ~2 * (2.50/85000)
+             "trailing_stop_trigger": 0.0018,       # ~60 * (2.50/85000)
              "leverage": 2,
-             "capital": 50.0,
-             "trailing_stop_trigger": 60,
+             "capital": 50.0
          }
     }
 }
@@ -109,7 +111,7 @@ def log_error(msg: str):
         f.write(f"[ERROR] {timestamp} - {msg}\n")
 
 # =============================================================================
-# GRID SCALPING BOT CLASS (Hybrid Exit Approach)
+# GRID SCALPING BOT CLASS (Hybrid Exit Approach with Trigger Logic)
 # =============================================================================
 
 class GridScalpingBot:
@@ -178,7 +180,8 @@ class GridScalpingBot:
             return
         try:
             order_side = "buy" if direction == "long" else "sell"
-            self.entry_price = self.reserved_price  # Execute at reserved price.
+            # Execute at the reserved price.
+            self.entry_price = self.reserved_price  
             position_size = (self.config["capital"] * self.config["leverage"]) / self.entry_price
             position_size = float(bitget.amount_to_precision(self.symbol, position_size))
             self.position_size = position_size
@@ -190,16 +193,17 @@ class GridScalpingBot:
                 self.stop_loss = self.entry_price - self.config["stop_loss_offset"]
                 self.highest_price = self.entry_price
                 self.primary_trailing_stop = None
+                # Initial trailing stop set based on the trigger offset.
                 self.trailing1_stop = self.reserved_price + self.config["entry_trigger_offset"]
                 self.log(f"Stop loss set at {self.stop_loss}")
-                self.log(f"Trailing1 fixed stop set at {self.trailing1_stop}")
+                self.log(f"Initial trailing stop set at {self.trailing1_stop}")
             else:
                 self.stop_loss = self.entry_price + self.config["stop_loss_offset"]
                 self.lowest_price = self.entry_price
                 self.primary_trailing_stop = None
                 self.trailing1_stop = self.reserved_price - self.config["entry_trigger_offset"]
                 self.log(f"Stop loss set at {self.stop_loss}")
-                self.log(f"Trailing1 fixed stop set at {self.trailing1_stop}")
+                self.log(f"Initial trailing stop set at {self.trailing1_stop}")
         except Exception as e:
             self.log(f"Error entering position: {e}")
 
@@ -279,33 +283,38 @@ class GridScalpingBot:
     def exit_position(self, exit_reason: str):
         if not self.in_position:
             return
+
         exit_side = "sell" if self.position_direction == "long" else "buy"
-        # Determine the exit price based on exit_reason and position direction.
+        try:
+            ticker = bitget.fetch_ticker(self.symbol)
+            current_market_price = float(ticker['last'])
+        except Exception as e:
+            self.log(f"Error fetching market price during exit: {e}")
+            current_market_price = self.reserved_price
+
+        # Determine exit price based on exit_reason.
         if self.position_direction == "long":
             if exit_reason == "primary_trailing":
                 exit_price = self.highest_price
-            elif exit_reason == "trailing1":
-                exit_price = self.trailing1_stop
+            elif exit_reason in ("trailing1", "global_stop"):
+                exit_price = current_market_price
             else:
                 exit_price = self.stop_loss
         else:
             if self.position_direction == "short":
                 if exit_reason == "primary_trailing":
                     exit_price = self.lowest_price
-                elif exit_reason == "trailing1":
-                    exit_price = self.trailing1_stop
+                elif exit_reason in ("trailing1", "global_stop"):
+                    exit_price = current_market_price
                 else:
                     exit_price = self.stop_loss
             else:
                 exit_price = self.stop_loss
 
         try:
-            # First, try placing a limit order at the chosen exit price.
             order = bitget.place_limit_order(self.symbol, exit_side, self.position_size, exit_price, reduce=True)
             self.log(f"Limit exit order placed at {exit_price} due to {exit_reason} condition")
-            # Wait for a short time to allow order fill.
             time.sleep(3)
-            # Check if the position is closed.
             positions = bitget.fetch_open_positions(self.symbol)
             total_contracts = sum(float(pos.get('contracts', 0)) for pos in positions) if positions else 0
             if total_contracts > 0:
@@ -330,7 +339,6 @@ class GridScalpingBot:
             except Exception as e:
                 self.log(f"Error during profit logging: {e}")
             self.cancel_all_orders()
-            # Reset state for reentry.
             self.in_position = False
             self.entry_price = None
             self.stop_loss = None
@@ -398,6 +406,5 @@ if __name__ == "__main__":
         log_info("Bot stopped via KeyboardInterrupt.")
     finally:
         csv_file.close()
-
 
 
