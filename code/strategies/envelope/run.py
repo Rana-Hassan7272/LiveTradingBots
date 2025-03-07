@@ -7,6 +7,8 @@ import csv
 import threading
 from typing import Dict, Optional
 
+import pandas as pd  # Needed for ATR and trend calculations
+
 # ---------------------- Helper: EMA Calculation ----------------------
 def calculate_ema(prices: list, period: int) -> float:
     if not prices or len(prices) == 0:
@@ -25,38 +27,49 @@ from utilities.bitget_futures import BitgetFutures
 # =============================================================================
 # CONFIGURATION & GLOBAL CONSTANTS
 # =============================================================================
-# Default BTC settings are in USD.
-# Overrides for SOL and XRP are scaled relative to BTC.
+# BTC defaults are expressed in USD.
+# New keys added for dynamic risk management:
+#  - risk_percent: Percentage of capital to risk per trade.
+#  - atr_period: Number of candles for ATR calculation.
+#  - atr_stop_multiplier: Multiplier for ATR to set stop loss.
+#  - atr_trailing_multiplier: Multiplier for ATR to set trailing stop.
+#  - sma_short_period and sma_long_period for trend filtering.
 params: Dict = {
     "symbols": ["BTC/USDT:USDT", "SOL/USDT:USDT", "XRP/USDT:USDT"],
     "default": {
-         "entry_trigger_offset": 40.0,       # BTC trigger threshold in USD
-         "trailing_drop_amount": 30.0,         # BTC trailing drop amount in USD
-         "trailing_stop_trigger": 60.0,        # BTC trailing stop trigger in USD
-         "min_profit_for_trailing": 8.0,         # BTC minimum profit for trailing stop in USD
-         "stop_loss_offset": 2.0,              # BTC fixed stop loss offset in USD
+         "entry_trigger_offset": 40.0,       # Trigger threshold in USD (for BTC)
+         "trailing_drop_amount": 30.0,         # Not used if ATR is available, fallback value
+         "trailing_stop_trigger": 60.0,        # Fallback trigger for trailing
+         "min_profit_for_trailing": 8.0,         # Minimum profit (in USD) before trailing activates
+         "stop_loss_offset": 2.0,              # Fallback fixed stop loss in USD
          "leverage": 2,
          "capital": 50.0,                    # Capital in USD for all coins
          "ema_short_period": 5,
          "ema_long_period": 12,
-         "global_stop_roi": -0.1             # Global stop loss threshold (%)
+         "global_stop_roi": -0.1,             # Global stop loss threshold (%)
+         "risk_percent": 0.01,                # Risk 1% of capital per trade
+         "atr_period": 14,                    # Number of candles for ATR calculation
+         "atr_stop_multiplier": 0.5,          # Stop loss = ATR * multiplier
+         "atr_trailing_multiplier": 0.5,      # Trailing stop offset = ATR * multiplier
+         "sma_short_period": 5,               # For trend filtering (short SMA)
+         "sma_long_period": 12               # For trend filtering (long SMA)
     },
     "overrides": {
          "SOL/USDT:USDT": {
-             "entry_trigger_offset": 0.07,       # ~40 * (144.18/85000)
-             "trailing_drop_amount": 0.05,         # ~30 * (144.18/85000)
-             "min_profit_for_trailing": 0.014,       # ~8 * (144.18/85000)
-             "stop_loss_offset": 0.0034,           # ~2 * (144.18/85000)
-             "trailing_stop_trigger": 0.10,        # ~60 * (144.18/85000)
+             "entry_trigger_offset": 0.07,       # Scaled from BTC (~40*(144.18/85000))
+             "trailing_drop_amount": 0.05,
+             "min_profit_for_trailing": 0.014,
+             "stop_loss_offset": 0.0034,
+             "trailing_stop_trigger": 0.10,
              "leverage": 2,
              "capital": 50.0
          },
          "XRP/USDT:USDT": {
-             "entry_trigger_offset": 0.0012,      # ~40 * (2.50/85000)
-             "trailing_drop_amount": 0.0009,        # ~30 * (2.50/85000)
-             "min_profit_for_trailing": 0.00024,    # ~8 * (2.50/85000)
-             "stop_loss_offset": 0.00006,           # ~2 * (2.50/85000)
-             "trailing_stop_trigger": 0.0018,       # ~60 * (2.50/85000)
+             "entry_trigger_offset": 0.0012,      # Scaled from BTC (~40*(2.50/85000))
+             "trailing_drop_amount": 0.0009,
+             "min_profit_for_trailing": 0.00024,
+             "stop_loss_offset": 0.00006,
+             "trailing_stop_trigger": 0.0018,
              "leverage": 2,
              "capital": 50.0
          }
@@ -111,7 +124,7 @@ def log_error(msg: str):
         f.write(f"[ERROR] {timestamp} - {msg}\n")
 
 # =============================================================================
-# GRID SCALPING BOT CLASS (Hybrid Exit Approach with Trigger Logic)
+# GRID SCALPING BOT CLASS (Optimized with ATR, Trend Filtering & Dynamic Sizing)
 # =============================================================================
 
 class GridScalpingBot:
@@ -136,6 +149,45 @@ class GridScalpingBot:
     def log(self, message: str):
         print(f"[{self.symbol}] {datetime.datetime.now().strftime('%H:%M:%S')}: {message}")
         log_info(f"{self.symbol} - {message}")
+
+    # --------------------- ATR Calculation ---------------------
+    def calculate_atr(self, timeframe='5m') -> float:
+        try:
+            # Fetch (atr_period + 1) candles
+            df = pd.DataFrame(bitget.fetch_recent_ohlcv(self.symbol, timeframe, limit=self.config["atr_period"] + 1),
+                              columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            # Ensure numeric conversion
+            df['close'] = pd.to_numeric(df['close'])
+            df['high'] = pd.to_numeric(df['high'])
+            df['low'] = pd.to_numeric(df['low'])
+            trs = []
+            for i in range(1, len(df)):
+                high = df.iloc[i]['high']
+                low = df.iloc[i]['low']
+                previous_close = df.iloc[i-1]['close']
+                tr = max(high - low, abs(high - previous_close), abs(low - previous_close))
+                trs.append(tr)
+            atr = sum(trs) / len(trs) if trs else 0
+            return atr
+        except Exception as e:
+            self.log(f"Error calculating ATR: {e}")
+            return 0
+
+    # --------------------- Trend Filtering using SMAs ---------------------
+    def check_trend(self, timeframe='5m', desired_direction="long") -> bool:
+        try:
+            df = pd.DataFrame(bitget.fetch_recent_ohlcv(self.symbol, timeframe, limit=self.config["sma_long_period"]),
+                              columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df['close'] = pd.to_numeric(df['close'])
+            sma_short = df['close'].rolling(window=self.config["sma_short_period"]).mean().iloc[-1]
+            sma_long = df['close'].rolling(window=self.config["sma_long_period"]).mean().iloc[-1]
+            if desired_direction == "long":
+                return sma_short > sma_long
+            else:
+                return sma_short < sma_long
+        except Exception as e:
+            self.log(f"Error calculating trend indicators: {e}")
+            return True
 
     # --------------------- Balance Check ---------------------
     def get_available_balance(self) -> float:
@@ -169,7 +221,7 @@ class GridScalpingBot:
             self.log(f"Error fetching open orders: {e}")
         self.last_order_ids = []
 
-    # --------------------- Position Entry ---------------------
+    # --------------------- Position Entry with Dynamic Sizing ---------------------
     def enter_position(self, direction: str):
         if self.in_position:
             self.log("Already in a position, skipping entry.")
@@ -178,30 +230,60 @@ class GridScalpingBot:
         if available < self.config["capital"]:
             self.log(f"Insufficient balance: Available {available} < Required {self.config['capital']}. Waiting for current position to close.")
             return
+
+        # Check trend filtering before entry:
+        if direction == "long":
+            if not self.check_trend(timeframe='5m', desired_direction="long"):
+                self.log("Trend not confirmed for long entry. Skipping trade.")
+                return
+        else:
+            if not self.check_trend(timeframe='5m', desired_direction="short"):
+                self.log("Trend not confirmed for short entry. Skipping trade.")
+                return
+
         try:
             order_side = "buy" if direction == "long" else "sell"
-            # Execute at the reserved price.
-            self.entry_price = self.reserved_price  
-            position_size = (self.config["capital"] * self.config["leverage"]) / self.entry_price
-            position_size = float(bitget.amount_to_precision(self.symbol, position_size))
-            self.position_size = position_size
-            order = bitget.place_market_order(self.symbol, order_side, position_size)
-            self.log(f"Entered {direction.upper()} position at {self.entry_price} with size {position_size}")
+            # Use reserved price as reference for entry.
+            self.entry_price = self.reserved_price
+            # Calculate ATR for dynamic stops.
+            atr = self.calculate_atr(timeframe='5m')
+            if atr > 0:
+                if direction == "long":
+                    self.stop_loss = self.entry_price - (atr * self.config["atr_stop_multiplier"])
+                    self.trailing1_stop = self.entry_price + (atr * self.config["atr_trailing_multiplier"])
+                else:
+                    self.stop_loss = self.entry_price + (atr * self.config["atr_stop_multiplier"])
+                    self.trailing1_stop = self.entry_price - (atr * self.config["atr_trailing_multiplier"])
+            else:
+                # Fallback to fixed values if ATR fails.
+                if direction == "long":
+                    self.stop_loss = self.entry_price - self.config["stop_loss_offset"]
+                    self.trailing1_stop = self.reserved_price + self.config["entry_trigger_offset"]
+                else:
+                    self.stop_loss = self.entry_price + self.config["stop_loss_offset"]
+                    self.trailing1_stop = self.reserved_price - self.config["entry_trigger_offset"]
+
+            # Calculate risk-based position size.
+            risk_amount = self.config["capital"] * self.config["risk_percent"]
+            stop_distance = abs(self.entry_price - self.stop_loss)
+            if stop_distance > 0:
+                self.position_size = (risk_amount / stop_distance) * self.config["leverage"]
+            else:
+                self.position_size = (self.config["capital"] * self.config["leverage"]) / self.entry_price
+
+            # Place market order for entry.
+            order = bitget.place_market_order(self.symbol, order_side, self.position_size)
+            self.log(f"Entered {direction.upper()} position at {self.entry_price} with size {self.position_size:.8f}")
             self.in_position = True
             self.position_direction = direction
             if direction == "long":
-                self.stop_loss = self.entry_price - self.config["stop_loss_offset"]
                 self.highest_price = self.entry_price
                 self.primary_trailing_stop = None
-                # Initial trailing stop set based on the trigger offset.
-                self.trailing1_stop = self.reserved_price + self.config["entry_trigger_offset"]
                 self.log(f"Stop loss set at {self.stop_loss}")
                 self.log(f"Initial trailing stop set at {self.trailing1_stop}")
             else:
-                self.stop_loss = self.entry_price + self.config["stop_loss_offset"]
                 self.lowest_price = self.entry_price
                 self.primary_trailing_stop = None
-                self.trailing1_stop = self.reserved_price - self.config["entry_trigger_offset"]
                 self.log(f"Stop loss set at {self.stop_loss}")
                 self.log(f"Initial trailing stop set at {self.trailing1_stop}")
         except Exception as e:
@@ -216,9 +298,10 @@ class GridScalpingBot:
             if direction == "long":
                 if current_price > self.highest_price:
                     self.highest_price = current_price
+                    # Update primary trailing stop using ATR if profit threshold met.
                     if self.highest_price >= self.entry_price + self.config["entry_trigger_offset"] and \
                        (self.highest_price - self.entry_price) >= self.config["min_profit_for_trailing"]:
-                        self.primary_trailing_stop = self.highest_price - self.config["trailing_drop_amount"]
+                        self.primary_trailing_stop = self.highest_price - (self.calculate_atr('5m') * self.config["atr_trailing_multiplier"])
                         self.log(f"Primary trailing stop updated to {self.primary_trailing_stop} (highest: {self.highest_price})")
                 trailing_trigger = self.config.get("trailing_stop_trigger", 60.0)
                 if self.highest_price is not None and (self.highest_price - current_price) >= trailing_trigger:
@@ -229,7 +312,7 @@ class GridScalpingBot:
                     self.lowest_price = current_price
                     if self.lowest_price <= self.entry_price - self.config["entry_trigger_offset"] and \
                        (self.entry_price - self.lowest_price) >= self.config["min_profit_for_trailing"]:
-                        self.primary_trailing_stop = self.lowest_price + self.config["trailing_drop_amount"]
+                        self.primary_trailing_stop = self.lowest_price + (self.calculate_atr('5m') * self.config["atr_trailing_multiplier"])
                         self.log(f"Primary trailing stop updated to {self.primary_trailing_stop} (lowest: {self.lowest_price})")
                 trailing_trigger = self.config.get("trailing_stop_trigger", 60.0)
                 if self.lowest_price is not None and (current_price - self.lowest_price) >= trailing_trigger:
@@ -292,13 +375,13 @@ class GridScalpingBot:
             self.log(f"Error fetching market price during exit: {e}")
             current_market_price = self.reserved_price
 
-        # Determine exit price based on exit_reason.
+        # Determine exit price:
         if self.position_direction == "long":
             if exit_reason == "primary_trailing":
                 exit_price = self.highest_price
             elif exit_reason in ("trailing1", "global_stop"):
                 exit_price = current_market_price
-            else:
+            else:  # stop_loss
                 exit_price = self.stop_loss
         else:
             if self.position_direction == "short":
@@ -350,7 +433,7 @@ class GridScalpingBot:
             self.position_size = None
             self.last_order_ids = []
 
-    # --------------------- Trigger Check ---------------------
+    # --------------------- Trigger Check with Trend Filter ---------------------
     def check_for_trigger(self):
         if self.in_position or self.reserved_price is None:
             return
@@ -361,11 +444,17 @@ class GridScalpingBot:
             if current_price >= self.reserved_price + trigger_offset:
                 self.log(f"Long trigger reached: {current_price} >= {self.reserved_price} + {trigger_offset}")
                 self.cancel_all_orders()
-                self.enter_position("long")
+                if self.check_trend(timeframe='5m', desired_direction="long"):
+                    self.enter_position("long")
+                else:
+                    self.log("Trend not confirmed for long entry.")
             elif current_price <= self.reserved_price - trigger_offset:
                 self.log(f"Short trigger reached: {current_price} <= {self.reserved_price} - {trigger_offset}")
                 self.cancel_all_orders()
-                self.enter_position("short")
+                if self.check_trend(timeframe='5m', desired_direction="short"):
+                    self.enter_position("short")
+                else:
+                    self.log("Trend not confirmed for short entry.")
         except Exception as e:
             self.log(f"Error checking for trigger: {e}")
 
@@ -406,5 +495,4 @@ if __name__ == "__main__":
         log_info("Bot stopped via KeyboardInterrupt.")
     finally:
         csv_file.close()
-
 
