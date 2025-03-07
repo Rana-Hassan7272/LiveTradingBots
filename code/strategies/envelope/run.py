@@ -337,10 +337,10 @@ class GridScalpingBot:
 
             order = bitget.place_limit_order(self.symbol, exit_side, self.position_size, exit_price, reduce=True)
             self.log(f"Placed exit limit order at {exit_price} due to {exit_reason} condition")
-            time.sleep(1)  # Wait 1 second for the limit order to fill.
+            time.sleep(4)  # Wait 1 second for the limit order to fill.
             # Forced exit loop: if position remains open, force exit via market order for up to 3 seconds.
             force_exit_start = time.time()
-            while time.time() - force_exit_start < 3:
+            while time.time() - force_exit_start < 8:
                 positions = bitget.fetch_open_positions(self.symbol)
                 total_contracts = sum(float(pos.get('contracts', 0)) for pos in positions) if positions else 0
                 if total_contracts == 0:
