@@ -1,30 +1,20 @@
 #!/usr/bin/env python3
 """
-Final Bot Code for Grid Scalping with Sell Trigger
+Final Hedged Bot Code for Grid Scalping with Sell Trigger
 
-This bot reserves the current market price and triggers an entry only if:
-  - For a long trade, the market rises to (reserved + ENTRY_TRIGGER_OFFSET_USD).
-  - For a short trade, the market falls to (reserved - ENTRY_TRIGGER_OFFSET_USD).
-
-On entry, the bot:
-  - Executes the trade at the reserved price.
-  - Sets a fixed stop loss at (entry - STOP_LOSS_OFFSET_USD) for longs.
-  - Sets a fixed Trailing1 stop at (entry + ENTRY_TRIGGER_OFFSET_USD) for longs 
-    (and for shorts, (entry - ENTRY_TRIGGER_OFFSET_USD)), so that the profit locked equals the trigger offset.
-  - Monitors the highest (or lowest) price and, once profit exceeds MIN_PROFIT_FOR_TRAILING_USD,
-    activates a dynamic primary trailing stop at (highest – TRAILING_DROP_AMOUNT_USD) for longs.
-  - Additionally, if the highest (or lowest) price falls by a configurable amount (TRAILING_STOP_TRIGGER_USD),
-    the bot will trigger an exit using the highest (or lowest) price.
-    
-Exit is triggered if the current price falls to or below:
-  - The stop loss,
-  - The dynamic primary trailing stop (if active), or
-  - The fixed Trailing1 stop.
-
-A limit order is used for exit to reduce slippage. If the limit order is not filled within a short interval,
-the bot repeatedly forces an exit via market order using flash_close_position() until the position is confirmed closed.
-
-This code is designed for continuous operation.
+This bot reserves the current market price and immediately places both a long and a short order at the reserved price.
+For example, if the reserved price is 89,000 USD, it enters:
+  - A long position at 89,000 USD with:
+      • Stop loss = reserved - STOP_LOSS_OFFSET (e.g., 89,000 - 2 = 88,998)
+      • Fixed Trailing1 stop = reserved + ENTRY_TRIGGER_OFFSET (e.g., 89,000 + 40 = 89,040)
+  - A short position at 89,000 USD with:
+      • Stop loss = reserved + STOP_LOSS_OFFSET (e.g., 89,000 + 2 = 89,002)
+      • Fixed Trailing1 stop = reserved - ENTRY_TRIGGER_OFFSET (e.g., 89,000 - 40 = 88,960)
+Once in trade, the bot continuously monitors each side:
+  - If the market moves favorably for one side (e.g. long moves to 89,040), that side remains active while the opposite side is canceled.
+  - Exit conditions (stop loss, dynamic trailing stop, fixed Trailing1 stop, and a global stop) are applied per side.
+A limit order is used for exit and, if not filled, a forced market exit is attempted until the position is fully closed.
+This hedged design guarantees a safe trade in both directions while ensuring that if one side becomes profitable, the other is canceled.
 """
 
 import os
@@ -36,9 +26,8 @@ import csv
 import threading
 from typing import Dict, Optional, Tuple
 
-# ---------------------- Helper: EMA Calculation ----------------------
+# ---------------------- Helper: EMA Calculation (Unused) ----------------------
 def calculate_ema(prices: list, period: int) -> float:
-    # (Not used in this version as EMA trigger has been removed.)
     if not prices or len(prices) == 0:
         return 0.0
     ema = prices[0]
@@ -55,17 +44,19 @@ from utilities.bitget_futures import BitgetFutures
 # =============================================================================
 # CONFIGURATION & GLOBAL CONSTANTS
 # =============================================================================
+# Note: global_stop_percent is the percentage loss that will trigger an immediate exit.
 params: Dict = {
     "symbols": ["BTC/USDT:USDT", "SOL/USDT:USDT", "XRP/USDT:USDT"],
     "default": {
-         "entry_trigger_offset": 40.0,       # Trigger threshold in USD
-         "trailing_drop_amount": 30.0,         # Dynamic trailing stop drop amount in USD
-         "trailing_stop_trigger": 60.0,        # If highest price falls by this amount, trigger exit
-         "min_profit_for_trailing": 8.0,         # Minimum profit to activate trailing stop
-         "stop_loss_offset": 2.0,              # Stop loss offset (e.g., 2 USD below entry for long)
+         "entry_trigger_offset": 40.0,       # Trigger offset (used to define fixed stop for each side)
+         "trailing_drop_amount": 30.0,         # Primary trailing stop drop amount in USD
+         "trailing_stop_trigger": 60.0,        # If the favorable price falls by this amount, force exit
+         "min_profit_for_trailing": 8.0,         # Minimum profit to activate dynamic trailing stop
+         "stop_loss_offset": 2.0,              # Stop loss offset in USD
+         "global_stop_percent": 0.5,           # Global stop if loss >= 0.5%
          "leverage": 2,
-         "capital": 100.0,                   # Capital is 100 USD
-         "ema_short_period": 5,              # (EMA parameters exist but are not used here)
+         "capital": 100.0,                   # Capital allocated per side (100 USD)
+         "ema_short_period": 5,              # (EMA parameters remain for reference but are not used)
          "ema_long_period": 12,
     },
     "overrides": {
@@ -74,6 +65,7 @@ params: Dict = {
              "trailing_drop_amount": 0.3,
              "min_profit_for_trailing": 0.08,
              "stop_loss_offset": 0.02,
+             "global_stop_percent": 0.5,
              "leverage": 2,
              "capital": 50.0,
              "trailing_stop_trigger": 60,
@@ -83,6 +75,7 @@ params: Dict = {
              "trailing_drop_amount": 0.075,
              "min_profit_for_trailing": 0.02,
              "stop_loss_offset": 0.01,
+             "global_stop_percent": 0.5,
              "leverage": 2,
              "capital": 50.0,
              "trailing_stop_trigger": 60,
@@ -138,7 +131,7 @@ def log_error(msg: str):
         f.write(f"[ERROR] {timestamp} - {msg}\n")
 
 # =============================================================================
-# GRID SCALPING BOT CLASS (Without EMA Trigger; Immediate Entry Based on Price)
+# GRID SCALPING BOT CLASS (Hedged Mode: Both Long & Short Orders)
 # =============================================================================
 
 class GridScalpingBot:
@@ -147,40 +140,25 @@ class GridScalpingBot:
         self.config = config["default"].copy()
         if symbol in config["overrides"]:
             self.config.update(config["overrides"][symbol])
-        self.reserved_price: Optional[float] = None
-        self.in_position: bool = False
-        self.entry_price: Optional[float] = None
-        self.stop_loss: Optional[float] = None
-        self.highest_price: Optional[float] = None
-        self.primary_trailing_stop: Optional[float] = None
-        self.trailing1_stop: Optional[float] = None
-        self.lowest_price: Optional[float] = None
-        self.position_direction: Optional[str] = None
-        self.position_size: Optional[float] = None
-        self.last_order_ids = []
+        # Instead of a single position, we maintain two:
+        self.long_position: Optional[Dict] = None  # Will hold keys: entry_price, stop_loss, highest_price, trailing1_stop, position_size
+        self.short_position: Optional[Dict] = None  # Will hold keys: entry_price, stop_loss, lowest_price, trailing1_stop, position_size
 
     # --------------------- Logging ---------------------
     def log(self, message: str):
         print(f"[{self.symbol}] {datetime.datetime.now().strftime('%H:%M:%S')}: {message}")
         log_info(f"{self.symbol} - {message}")
 
-    # --------------------- Balance Check ---------------------
-    def get_available_balance(self) -> float:
-        try:
-            bal = bitget.fetch_balance()
-            return float(bal['USDT']['free'])
-        except Exception as e:
-            self.log(f"Error fetching balance: {e}")
-            return 0.0
-
     # --------------------- Reserve Price ---------------------
     def reserve_price_method(self):
         try:
             ticker = bitget.fetch_ticker(self.symbol)
-            self.reserved_price = float(ticker['last'])
-            self.log(f"Reserved price set to {self.reserved_price}")
+            reserved = float(ticker['last'])
+            self.log(f"Reserved price set to {reserved}")
+            return reserved
         except Exception as e:
             self.log(f"Error reserving price: {e}")
+            return None
 
     # --------------------- Cancel All Orders ---------------------
     def cancel_all_orders(self):
@@ -194,199 +172,194 @@ class GridScalpingBot:
                     self.log(f"Error cancelling order {order['id']}: {e}")
         except Exception as e:
             self.log(f"Error fetching open orders: {e}")
-        self.last_order_ids = []
 
-    # --------------------- Position Entry ---------------------
-    def enter_position(self, direction: str):
-        if self.in_position:
-            self.log("Already in a position, skipping entry.")
+    # --------------------- Enter Both Positions ---------------------
+    def enter_hedged_positions(self):
+        reserved = self.reserve_price_method()
+        if reserved is None:
             return
-        available = self.get_available_balance()
-        if available < self.config["capital"]:
-            self.log(f"Insufficient balance: Available {available} < Required {self.config['capital']}. Waiting for current position to close.")
-            return
+        # Calculate position size for each side.
+        pos_size = (self.config["capital"] * self.config["leverage"]) / reserved
+        pos_size = float(bitget.amount_to_precision(self.symbol, pos_size))
+        # Long position details.
+        self.long_position = {
+            "entry_price": reserved,
+            "stop_loss": reserved - self.config["stop_loss_offset"],
+            "highest_price": reserved,
+            "trailing1_stop": reserved + self.config["entry_trigger_offset"],
+            "position_size": pos_size
+        }
+        # Short position details.
+        self.short_position = {
+            "entry_price": reserved,
+            "stop_loss": reserved + self.config["stop_loss_offset"],
+            "lowest_price": reserved,
+            "trailing1_stop": reserved - self.config["entry_trigger_offset"],
+            "position_size": pos_size
+        }
+        # Place market orders for both sides.
         try:
-            order_side = "buy" if direction == "long" else "sell"
-            self.entry_price = self.reserved_price  # Always execute at reserved price.
-            position_size = (self.config["capital"] * self.config["leverage"]) / self.entry_price
-            position_size = float(bitget.amount_to_precision(self.symbol, position_size))
-            self.position_size = position_size
-            order = bitget.place_market_order(self.symbol, order_side, position_size)
-            self.log(f"Entered {direction.upper()} position at {self.entry_price} with size {position_size}")
-            self.in_position = True
-            self.position_direction = direction
-            if direction == "long":
-                self.stop_loss = self.entry_price - self.config["stop_loss_offset"]
-                self.highest_price = self.entry_price
-                self.primary_trailing_stop = None
-                self.trailing1_stop = self.reserved_price + self.config["entry_trigger_offset"]
-                self.log(f"Stop loss set at {self.stop_loss}")
-                self.log(f"Trailing1 fixed stop set at {self.trailing1_stop}")
-            else:
-                self.stop_loss = self.entry_price + self.config["stop_loss_offset"]
-                self.lowest_price = self.entry_price
-                self.primary_trailing_stop = None
-                self.trailing1_stop = self.reserved_price - self.config["entry_trigger_offset"]
-                self.log(f"Stop loss set at {self.stop_loss}")
-                self.log(f"Trailing1 fixed stop set at {self.trailing1_stop}")
+            long_order = bitget.place_market_order(self.symbol, "buy", pos_size)
+            short_order = bitget.place_market_order(self.symbol, "sell", pos_size)
+            self.log(f"Entered LONG position at {reserved} with size {pos_size}")
+            self.log(f"Entered SHORT position at {reserved} with size {pos_size}")
         except Exception as e:
-            self.log(f"Error entering position: {e}")
+            self.log(f"Error entering hedged positions: {e}")
+            # If error occurs, cancel any orders and reset positions.
+            self.long_position = None
+            self.short_position = None
 
-    # --------------------- Primary Trailing Stop Update ---------------------
-    def update_primary_trailing_stop(self):
+    # --------------------- Update Positions ---------------------
+    def update_positions(self):
         try:
             ticker = bitget.fetch_ticker(self.symbol)
             current_price = float(ticker['last'])
-            direction = self.position_direction
-            if direction == "long":
-                if current_price > self.highest_price:
-                    self.highest_price = current_price
-                    if self.highest_price >= self.entry_price + self.config["entry_trigger_offset"] and \
-                       (self.highest_price - self.entry_price) >= self.config["min_profit_for_trailing"]:
-                        self.primary_trailing_stop = self.highest_price - self.config["trailing_drop_amount"]
-                        self.log(f"Primary trailing stop updated to {self.primary_trailing_stop} (highest: {self.highest_price})")
-                trailing_trigger = self.config.get("trailing_stop_trigger", 60.0)
-                if self.highest_price is not None and (self.highest_price - current_price) >= trailing_trigger:
-                    self.log(f"Primary trailing trigger hit: {self.highest_price} - {current_price} >= {trailing_trigger}")
-                    self.primary_trailing_stop = self.highest_price
-            else:
-                if current_price < self.lowest_price:
-                    self.lowest_price = current_price
-                    if self.lowest_price <= self.entry_price - self.config["entry_trigger_offset"] and \
-                       (self.entry_price - self.lowest_price) >= self.config["min_profit_for_trailing"]:
-                        self.primary_trailing_stop = self.lowest_price + self.config["trailing_drop_amount"]
-                        self.log(f"Primary trailing stop updated to {self.primary_trailing_stop} (lowest: {self.lowest_price})")
-                trailing_trigger = self.config.get("trailing_stop_trigger", 60.0)
-                if self.lowest_price is not None and (current_price - self.lowest_price) >= trailing_trigger:
-                    self.log(f"Primary trailing trigger hit: {current_price} - {self.lowest_price} >= {trailing_trigger}")
-                    self.primary_trailing_stop = self.lowest_price
+            # Update long position highest price.
+            if self.long_position:
+                if current_price > self.long_position["highest_price"]:
+                    self.long_position["highest_price"] = current_price
+            # Update short position lowest price.
+            if self.short_position:
+                if current_price < self.short_position["lowest_price"]:
+                    self.short_position["lowest_price"] = current_price
         except Exception as e:
-            self.log(f"Error updating primary trailing stop: {e}")
+            self.log(f"Error updating positions: {e}")
 
-    # --------------------- Exit Conditions Check ---------------------
-    def check_exit_conditions(self) -> Optional[str]:
+    # --------------------- Check Exit Conditions for a Side ---------------------
+    def check_exit_for_side(self, side: str) -> Optional[str]:
+        # side: "long" or "short"
         try:
             ticker = bitget.fetch_ticker(self.symbol)
             current_price = float(ticker['last'])
-            direction = self.position_direction
-            if direction == "long":
-                if current_price <= self.stop_loss:
-                    self.log(f"Stop loss hit: {current_price} <= {self.stop_loss}")
+            config = self.config
+            pos = self.long_position if side == "long" else self.short_position
+            if not pos:
+                return None
+            # Global stop check (loss percentage)
+            if side == "long":
+                loss_percent = ((pos["entry_price"] - current_price) / pos["entry_price"]) * 100
+                if loss_percent >= config.get("global_stop_percent", 0.5):
+                    self.log(f"Global stop hit for LONG: Loss {loss_percent:.2f}%")
+                    return "global_stop"
+            else:
+                loss_percent = ((current_price - pos["entry_price"]) / pos["entry_price"]) * 100
+                if loss_percent >= config.get("global_stop_percent", 0.5):
+                    self.log(f"Global stop hit for SHORT: Loss {loss_percent:.2f}%")
+                    return "global_stop"
+            # For LONG:
+            if side == "long":
+                if current_price <= pos["stop_loss"]:
+                    self.log(f"LONG stop loss hit: {current_price} <= {pos['stop_loss']}")
                     return "stop_loss"
-                if self.primary_trailing_stop is not None and current_price <= self.primary_trailing_stop:
-                    if self.highest_price >= self.entry_price + self.config["entry_trigger_offset"]:
-                        self.log(f"Primary trailing stop hit: {current_price} <= {self.primary_trailing_stop}")
-                        return "primary_trailing"
-                if current_price <= self.trailing1_stop:
-                    self.log(f"Trailing1 stop hit: {current_price} <= {self.trailing1_stop}")
+                if current_price <= pos["trailing1_stop"]:
+                    self.log(f"LONG Trailing1 stop hit: {current_price} <= {pos['trailing1_stop']}")
                     return "trailing1"
             else:
-                if current_price >= self.stop_loss:
-                    self.log(f"Stop loss hit: {current_price} >= {self.stop_loss}")
+                if current_price >= pos["stop_loss"]:
+                    self.log(f"SHORT stop loss hit: {current_price} >= {pos['stop_loss']}")
                     return "stop_loss"
-                if self.primary_trailing_stop is not None and current_price >= self.primary_trailing_stop:
-                    if self.lowest_price <= self.entry_price - self.config["entry_trigger_offset"]:
-                        self.log(f"Primary trailing stop hit: {current_price} >= {self.primary_trailing_stop}")
-                        return "primary_trailing"
-                if current_price >= self.trailing1_stop:
-                    self.log(f"Trailing1 stop hit: {current_price} >= {self.trailing1_stop}")
+                if current_price >= pos["trailing1_stop"]:
+                    self.log(f"SHORT Trailing1 stop hit: {current_price} >= {pos['trailing1_stop']}")
                     return "trailing1"
             return None
         except Exception as e:
-            self.log(f"Error checking exit conditions: {e}")
+            self.log(f"Error checking exit conditions for {side}: {e}")
             return None
 
-    # --------------------- Position Exit ---------------------
-    def exit_position(self, exit_reason: str):
-        if not self.in_position:
-            return
+    # --------------------- Exit a Given Side ---------------------
+    def exit_side(self, side: str, exit_reason: str):
         try:
-            exit_side = "sell" if self.position_direction == "long" else "buy"
-            if self.position_direction == "long":
-                if exit_reason == "primary_trailing":
-                    exit_price = self.highest_price
-                elif exit_reason == "trailing1":
-                    exit_price = self.trailing1_stop
-                else:
-                    exit_price = self.stop_loss
+            config = self.config
+            ticker = bitget.fetch_ticker(self.symbol)
+            current_price = float(ticker['last'])
+            pos = self.long_position if side == "long" else self.short_position
+            if not pos:
+                return
+            # Determine exit price.
+            if exit_reason == "global_stop":
+                exit_price = current_price
+            elif exit_reason in ["trailing1", "stop_loss"]:
+                exit_price = pos["stop_loss"] if exit_reason == "stop_loss" else pos["trailing1_stop"]
             else:
-                if self.position_direction == "short":
-                    if exit_reason == "primary_trailing":
-                        exit_price = self.lowest_price
-                    elif exit_reason == "trailing1":
-                        exit_price = self.trailing1_stop
-                    else:
-                        exit_price = self.stop_loss
-                else:
-                    exit_price = self.stop_loss
-
-            order = bitget.place_limit_order(self.symbol, exit_side, self.position_size, exit_price, reduce=True)
-            self.log(f"Placed exit limit order at {exit_price} due to {exit_reason} condition")
+                # For dynamic trailing exit we can use highest (or lowest) price.
+                exit_price = pos["highest_price"] if side == "long" else pos["lowest_price"]
+            exit_side = "sell" if side == "long" else "buy"
+            order = bitget.place_limit_order(self.symbol, exit_side, pos["position_size"], exit_price, reduce=True)
+            self.log(f"Placed {side.upper()} exit limit order at {exit_price} due to {exit_reason} condition")
             time.sleep(3)
-            # Check if the position is closed by summing the contract sizes.
+            # Forced exit loop.
             force_exit_start = time.time()
-            while time.time() - force_exit_start < 10:
+            while time.time() - force_exit_start < 15:
                 positions = bitget.fetch_open_positions(self.symbol)
-                total_contracts = sum(float(pos.get('contracts', 0)) for pos in positions) if positions else 0
+                total_contracts = sum(float(p.get('contracts', 0)) for p in positions) if positions else 0
                 if total_contracts == 0:
                     break
-                self.log("Limit order not filled; forcing exit via market order.")
+                self.log(f"{side.upper()} limit order not filled; forcing exit via market order.")
                 try:
-                    bitget.flash_close_position(self.symbol)
-                    self.log("Forced exit via flash_close_position.")
+                    result = bitget.flash_close_position(self.symbol)
+                    self.log(f"Forced exit result for {side.upper()}: {result}")
                 except Exception as ex:
-                    if "No position to close" in str(ex):
-                        self.log("Position already closed, ignoring forced exit error.")
-                        break
-                    else:
-                        self.log(f"Error forcing exit: {ex}")
+                    self.log(f"Error during forced exit for {side.upper()}: {ex}")
                 time.sleep(1)
-            profit = (exit_price - self.entry_price) if self.position_direction == "long" else (self.entry_price - exit_price)
-            log_csv(self.symbol, self.position_direction, self.entry_price, exit_price, profit)
-            self.cancel_all_orders()
+            profit = (exit_price - pos["entry_price"]) if side == "long" else (pos["entry_price"] - exit_price)
+            log_csv(self.symbol, side, pos["entry_price"], exit_price, profit)
+            self.log(f"{side.upper()} position exited with profit: {profit}")
+            # Clear the position.
+            if side == "long":
+                self.long_position = None
+            else:
+                self.short_position = None
         except Exception as e:
-            self.log(f"Error exiting position: {e}")
-        finally:
-            self.in_position = False
-            self.position = None
-            self.entry_price = None
-            self.stop_loss = None
-            self.primary_trailing_stop = None
-            self.trailing1_stop = None
-            self.highest_price = None
-            self.lowest_price = None
-            self.position_direction = None
-            self.position_size = None
-            self.last_order_ids = []
+            self.log(f"Error exiting {side.upper()} position: {e}")
 
-    # --------------------- Trigger Check ---------------------
+    # --------------------- Hedge Management ---------------------
+    def manage_hedge(self):
+        """
+        Update positions and, if one side's trigger condition is met,
+        exit that side and cancel the opposite side.
+        """
+        self.update_positions()
+        long_exit = self.check_exit_for_side("long") if self.long_position else None
+        short_exit = self.check_exit_for_side("short") if self.short_position else None
+
+        # If one side hits exit, cancel the opposite side.
+        if long_exit and self.long_position:
+            self.exit_side("long", long_exit)
+            if self.short_position:
+                self.log("Cancelling SHORT position due to LONG exit.")
+                self.cancel_all_orders()
+                self.short_position = None
+        if short_exit and self.short_position:
+            self.exit_side("short", short_exit)
+            if self.long_position:
+                self.log("Cancelling LONG position due to SHORT exit.")
+                self.cancel_all_orders()
+                self.long_position = None
+
+    # --------------------- Trigger Check (Hedged Entry) ---------------------
     def check_for_trigger(self):
-        if self.in_position or self.reserved_price is None:
-            return
-        try:
-            ticker = bitget.fetch_ticker(self.symbol)
-            current_price = float(ticker['last'])
-            trigger_offset = self.config["entry_trigger_offset"]
-            if current_price >= self.reserved_price + trigger_offset:
-                self.log(f"Long trigger reached: {current_price} >= {self.reserved_price} + {trigger_offset}")
-                self.cancel_all_orders()
-                self.enter_position("long")
-            elif current_price <= self.reserved_price - trigger_offset:
-                self.log(f"Short trigger reached: {current_price} <= {self.reserved_price} - {trigger_offset}")
-                self.cancel_all_orders()
-                self.enter_position("short")
-        except Exception as e:
-            self.log(f"Error checking for trigger: {e}")
+        # In hedged mode, if no positions are open, enter both orders.
+        if self.long_position is None and self.short_position is None:
+            try:
+                ticker = bitget.fetch_ticker(self.symbol)
+                current_price = float(ticker['last'])
+                reserved = self.reserve_price_method()
+                if reserved is None:
+                    return
+                # Once reserved is set, immediately place both orders.
+                self.log("Placing hedged orders for both LONG and SHORT.")
+                self.enter_hedged_positions()
+            except Exception as e:
+                self.log(f"Error checking for trigger in hedged mode: {e}")
 
     # --------------------- Main Cycle ---------------------
     def run_cycle(self):
-        if not self.in_position:
+        if self.long_position is None and self.short_position is None:
             self.check_for_trigger()
         else:
-            self.update_primary_trailing_stop()
-            exit_reason = self.check_exit_conditions()
-            if exit_reason is not None:
-                self.exit_position(exit_reason)
+            self.manage_hedge()
+            # If both positions are closed, update reserved price.
+            if self.long_position is None and self.short_position is None:
                 self.reserve_price_method()
 
 # =============================================================================
@@ -399,7 +372,7 @@ def main():
         bot = GridScalpingBot(symbol, params)
         bot.reserve_price_method()
         bots[symbol] = bot
-        bot.log("Bot initialisiert und bereit.")
+        bot.log("Bot initialisiert und bereit (hedged mode).")
     while True:
         for symbol, bot in bots.items():
             try:
@@ -415,4 +388,5 @@ if __name__ == "__main__":
         log_info("Bot per KeyboardInterrupt gestoppt.")
     finally:
         csv_file.close()
+
 
