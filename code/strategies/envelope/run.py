@@ -10,22 +10,19 @@ On entry, the bot:
   - Executes the trade at the reserved price.
   - Sets a fixed stop loss at (entry - STOP_LOSS_OFFSET_USD) for longs.
   - Sets a fixed Trailing1 stop at (entry + ENTRY_TRIGGER_OFFSET_USD) for longs 
-    (and for shorts, (entry - ENTRY_TRIGGER_OFFSET_USD)), so that the profit locked equals the trigger offset.
+    (and for shorts, (entry - ENTRY_TRIGGER_OFFSET_USD)).
   - Monitors the highest (or lowest) price and, once profit exceeds MIN_PROFIT_FOR_TRAILING_USD,
     activates a dynamic primary trailing stop at (highest – TRAILING_DROP_AMOUNT_USD) for longs.
-  - Additionally, if the highest (or lowest) price falls by a configurable amount (TRAILING_STOP_TRIGGER_USD),
-    the bot will trigger an exit using the highest (or lowest) price.
     
 Exit is triggered if the current price falls to or below:
   - The stop loss,
   - The dynamic primary trailing stop (if active),
   - The fixed Trailing1 stop, or
-  - The global stop – if the trade loses more than the configured percentage.
+  - The global stop – if the trade loses more than the configured percentage (–0.1% by default).
 
 A limit order is used for exit to reduce slippage. If the limit order is not filled within 1 second,
-the bot repeatedly forces an exit via market order (using place_market_order() as a forced exit)
-for up to 5 seconds until no open contracts remain.
-
+the bot forces an exit via market order (using place_market_order()) for up to 3 seconds until no open contracts remain.
+Then it cancels all orders and resets its state.
 This code is designed for continuous operation.
 """
 
@@ -38,9 +35,8 @@ import csv
 import threading
 from typing import Dict, Optional, Tuple
 
-# ---------------------- Helper: EMA Calculation ----------------------
+# ---------------------- Helper: EMA Calculation (Unused) ----------------------
 def calculate_ema(prices: list, period: int) -> float:
-    # (EMA calculation is present for reference; not used in this version.)
     if not prices or len(prices) == 0:
         return 0.0
     ema = prices[0]
@@ -57,9 +53,8 @@ from utilities.bitget_futures import BitgetFutures
 # =============================================================================
 # CONFIGURATION & GLOBAL CONSTANTS
 # =============================================================================
-# For testing, ensure that only BTC is used if desired.
 params: Dict = {
-    "symbols": ["BTC/USDT:USDT"],
+    "symbols": ["BTC/USDT:USDT"],  # Testing with BTC only
     "default": {
          "entry_trigger_offset": 40.0,       # Trigger threshold in USD
          "trailing_drop_amount": 30.0,         # Dynamic trailing stop drop amount in USD
@@ -69,30 +64,11 @@ params: Dict = {
          "global_stop_percent": 0.1,           # Global stop if loss reaches 0.1%
          "leverage": 2,
          "capital": 100.0,                   # Capital is 100 USD
-         "ema_short_period": 5,              # (EMA parameters exist but are not used here)
+         "ema_short_period": 5,
          "ema_long_period": 12,
     },
     "overrides": {
-         "SOL/USDT:USDT": {
-             "entry_trigger_offset": 400,
-             "trailing_drop_amount": 0.3,
-             "min_profit_for_trailing": 0.08,
-             "stop_loss_offset": 0.02,
-             "global_stop_percent": 0.1,
-             "leverage": 2,
-             "capital": 50.0,
-             "trailing_stop_trigger": 60,
-         },
-         "XRP/USDT:USDT": {
-             "entry_trigger_offset": 500,
-             "trailing_drop_amount": 0.075,
-             "min_profit_for_trailing": 0.02,
-             "stop_loss_offset": 0.01,
-             "global_stop_percent": 0.1,
-             "leverage": 2,
-             "capital": 50.0,
-             "trailing_stop_trigger": 60,
-         }
+         # Overrides exist for other symbols, but testing is with BTC only.
     }
 }
 
@@ -144,7 +120,7 @@ def log_error(msg: str):
         f.write(f"[ERROR] {timestamp} - {msg}\n")
 
 # =============================================================================
-# GRID SCALPING BOT CLASS (Without EMA Trigger; Immediate Entry Based on Price)
+# GRID SCALPING BOT CLASS (Non-Hedged Mode)
 # =============================================================================
 
 class GridScalpingBot:
@@ -213,7 +189,7 @@ class GridScalpingBot:
             return
         try:
             order_side = "buy" if direction == "long" else "sell"
-            # For this version, entry is at the reserved price.
+            # Entry is executed at the reserved price.
             self.entry_price = self.reserved_price
             position_size = (self.config["capital"] * self.config["leverage"]) / self.entry_price
             position_size = float(bitget.amount_to_precision(self.symbol, position_size))
@@ -276,8 +252,7 @@ class GridScalpingBot:
             ticker = bitget.fetch_ticker(self.symbol)
             current_price = float(ticker['last'])
             direction = self.position_direction
-
-            # Global stop check:
+            # Global stop check (ROE)
             if direction == "long":
                 loss_percent = ((self.entry_price - current_price) / self.entry_price) * 100
                 if loss_percent >= self.config.get("global_stop_percent", 0.1):
@@ -288,7 +263,6 @@ class GridScalpingBot:
                 if loss_percent >= self.config.get("global_stop_percent", 0.1):
                     self.log(f"Global stop hit: Loss {loss_percent:.2f}% >= {self.config.get('global_stop_percent', 0.1)}%")
                     return "global_stop"
-
             if direction == "long":
                 if current_price <= self.stop_loss:
                     self.log(f"Stop loss hit: {current_price} <= {self.stop_loss}")
@@ -344,11 +318,11 @@ class GridScalpingBot:
 
             order = bitget.place_limit_order(self.symbol, exit_side, self.position_size, exit_price, reduce=True)
             self.log(f"Placed exit limit order at {exit_price} due to {exit_reason} condition")
-            # Wait 1 second for limit order to fill.
+            # Wait 1 second for the limit order to fill.
             time.sleep(1)
-            # Forced exit loop: check for open positions for up to 5 seconds.
+            # Forced exit loop: if position remains open, force exit via market order for up to 3 seconds.
             force_exit_start = time.time()
-            while time.time() - force_exit_start < 5:
+            while time.time() - force_exit_start < 3:
                 positions = bitget.fetch_open_positions(self.symbol)
                 total_contracts = sum(float(pos.get('contracts', 0)) for pos in positions) if positions else 0
                 if total_contracts == 0:
@@ -434,6 +408,5 @@ if __name__ == "__main__":
         log_info("Bot per KeyboardInterrupt gestoppt.")
     finally:
         csv_file.close()
-
 
 
