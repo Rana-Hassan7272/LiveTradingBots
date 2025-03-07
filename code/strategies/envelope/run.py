@@ -38,7 +38,7 @@ params: Dict = {
     "symbols": ["BTC/USDT:USDT", "SOL/USDT:USDT", "XRP/USDT:USDT"],
     "default": {
          "entry_trigger_offset": 40.0,       # Trigger threshold in USD (for BTC)
-         "trailing_drop_amount": 30.0,         # Not used if ATR is available, fallback value
+         "trailing_drop_amount": 30.0,         # Fallback value if ATR not available
          "trailing_stop_trigger": 60.0,        # Fallback trigger for trailing
          "min_profit_for_trailing": 8.0,         # Minimum profit (in USD) before trailing activates
          "stop_loss_offset": 2.0,              # Fallback fixed stop loss in USD
@@ -49,10 +49,10 @@ params: Dict = {
          "global_stop_roi": -0.1,             # Global stop loss threshold (%)
          "risk_percent": 0.01,                # Risk 1% of capital per trade
          "atr_period": 14,                    # Number of candles for ATR calculation
-         "atr_stop_multiplier": 0.5,          # Stop loss = ATR * multiplier
-         "atr_trailing_multiplier": 0.5,      # Trailing stop offset = ATR * multiplier
+         "atr_stop_multiplier": 0.1,          # Stop loss = ATR * 0.1  (e.g. 20 USD if ATR=200)
+         "atr_trailing_multiplier": 0.3,      # Trailing stop offset = ATR * 0.3  (e.g. 60 USD if ATR=200)
          "sma_short_period": 5,               # For trend filtering (short SMA)
-         "sma_long_period": 12               # For trend filtering (long SMA)
+         "sma_long_period": 12                # For trend filtering (long SMA)
     },
     "overrides": {
          "SOL/USDT:USDT": {
@@ -298,7 +298,6 @@ class GridScalpingBot:
             if direction == "long":
                 if current_price > self.highest_price:
                     self.highest_price = current_price
-                    # Update primary trailing stop using ATR if profit threshold met.
                     if self.highest_price >= self.entry_price + self.config["entry_trigger_offset"] and \
                        (self.highest_price - self.entry_price) >= self.config["min_profit_for_trailing"]:
                         self.primary_trailing_stop = self.highest_price - (self.calculate_atr('5m') * self.config["atr_trailing_multiplier"])
@@ -375,13 +374,12 @@ class GridScalpingBot:
             self.log(f"Error fetching market price during exit: {e}")
             current_market_price = self.reserved_price
 
-        # Determine exit price:
         if self.position_direction == "long":
             if exit_reason == "primary_trailing":
                 exit_price = self.highest_price
             elif exit_reason in ("trailing1", "global_stop"):
                 exit_price = current_market_price
-            else:  # stop_loss
+            else:
                 exit_price = self.stop_loss
         else:
             if self.position_direction == "short":
